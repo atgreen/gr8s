@@ -138,6 +138,9 @@ join listener, which also serves this runtime's exec streams."
   (store nil)
   ;; What the browser last reported (its "stats" answer) and how long asking took.
   (stats nil) (rtt nil)
+  ;; The join listener's handler for this browser's messages to its peers ("signal",
+  ;; "have"), and a function of a layer digest giving the other nodes that hold it.
+  (peer-handler nil) (layer-holders nil)
   (execs (make-hash-table :test #'equal :synchronized t))
   ;; "namespace/name" -> uid, for the Pod proxy.
   (names (make-hash-table :test #'equal :synchronized t)))
@@ -151,6 +154,9 @@ passing each running exec its output."
             (let ((op (gethash "op" message)))
               (cond ((and (equal "status" op) (stringp (gethash "uid" message)))
                      (browser-runtime-note-status runtime (gethash "uid" message) (gethash "status" message)))
+                    ((member op '("signal" "have") :test #'equal)
+                     (let ((handler (browser-runtime-peer-handler runtime)))
+                       (when handler (funcall handler message))))
                     ((member op '("exec-output" "exec-exit") :test #'equal)
                      (let ((exec (gethash (gethash "exec" message) (browser-runtime-execs runtime))))
                        (when exec (browser-exec-deliver exec message))))))))
@@ -179,7 +185,7 @@ NIL. It is the server's to use and never goes to the browser."
                   append (ignore-errors (gr8s.kubelet::pull-secret-entries secret)))))
     (first (gr8s.kubelet::matching-registry-credentials entries (gr8s.kubelet::image-repository image)))))
 
-(defun browser-pod-request (pod &optional images store)
+(defun browser-pod-request (pod &optional images store layer-holders)
   "What the browser needs to run POD: its identity and its spec, a copy, with each
 container's image resolved through IMAGES, with POD's pull credentials from STORE, when
 there are any."
@@ -188,9 +194,15 @@ there are any."
     (when images
       (loop for container across (concatenate 'vector (gethash "initContainers" spec #())
                                               (gethash "containers" spec #()))
-            do (setf (gethash "imageInfo" container)
-                     (resolve-browser-image images (gethash "image" container)
-                                            (browser-pod-pull-credential store pod (gethash "image" container))))))
+            do (let ((info (gr8s.resources::copy-core-object
+                            (resolve-browser-image images (gethash "image" container)
+                                                   (browser-pod-pull-credential store pod (gethash "image" container))))))
+                 ;; Other tabs holding a layer can give it, checked against its digest.
+                 (when layer-holders
+                   (loop for layer across (gethash "layers" info #())
+                         for holders = (funcall layer-holders (gethash "digest" layer))
+                         when holders do (setf (gethash "peers" layer) (coerce holders 'vector))))
+                 (setf (gethash "imageInfo" container) info))))
     (core-object "uid" (gr8s.model::pod-uid pod)
                  "name" (gethash "name" (gethash "metadata" object))
                  "namespace" (gethash "namespace" (gethash "metadata" object))
@@ -199,7 +211,8 @@ there are any."
 (defmethod gr8s.runtime::runtime-ensure ((runtime browser-runtime) pod)
   (let* ((network (browser-runtime-network runtime))
          (address (and network (browser-network-address network (gr8s.model::pod-uid pod))))
-         (request (browser-pod-request pod (browser-runtime-images runtime) (browser-runtime-store runtime)))
+         (request (browser-pod-request pod (browser-runtime-images runtime) (browser-runtime-store runtime)
+                                       (browser-runtime-layer-holders runtime)))
          (result (progn
                    (when address
                      (setf (gethash "network" request)
@@ -495,7 +508,64 @@ Namespaces, until SESSION ends."
 (defparameter +browser-node-stats-seconds+ 10
   "How often the server asks a browser for its Pods' VM statistics, for /metrics.")
 
-(defun start-browser-node-reporter (session store name &key pod-proxy runtime)
+(defun browser-peer-message (acceptor from message)
+  "Handle MESSAGE, which the browser node FROM sent for its peers: relay a WebRTC \"signal\"
+to the browser node it names, or record the layers it says it holds. Only connected
+browser nodes are reached, and each learns whom a signal is from from this server."
+  (let ((op (gethash "op" message)))
+    (cond ((equal op "signal")
+           (let* ((to (gethash "to" message))
+                  (target (and (stringp to) (not (equal to from)) (gethash to (browser-join-sessions acceptor)))))
+             (when target
+               (ignore-errors
+                (browser-session-send target (core-object "op" "signal" "from" from
+                                                          "data" (gethash "data" message 'null)))))))
+          ((equal op "have")
+           (let ((digests (gethash "digests" message)))
+             (when (vectorp digests)
+               (setf (gethash from (browser-join-holdings acceptor))
+                     (loop for digest across digests
+                           repeat 4096
+                           when (and (stringp digest) (cl-ppcre:scan "^sha256:[0-9a-f]{64}$" digest))
+                             collect digest))))))))
+
+(defun browser-node-peers (acceptor self)
+  "The other browser nodes connected through ACCEPTOR, each with its Pod CIDR, which a tab
+may reach directly."
+  (coerce (loop for name being the hash-keys of (browser-join-runtimes acceptor) using (hash-value runtime)
+                for network = (browser-runtime-network runtime)
+                unless (or (equal name self) (null network))
+                  collect (core-object "node" name "cidr" (browser-network-cidr network)))
+          'vector))
+
+(defun browser-node-ingress-policy (runtime)
+  "RUNTIME's Pods' ingress policy, by address, for its tab to enforce on what peers send it:
+each Pod's isolation and its allowed (cidr excepts ports) entries, ports \"all\" or a
+list of (protocol first last)."
+  (let ((network (browser-runtime-network runtime))
+        (result (core-object)))
+    (when (and network (browser-network-policy network))
+      (let ((policy (browser-network-policy network)))
+        (bt:with-lock-held ((browser-policy-lock policy))
+          (loop for address being the hash-keys of (browser-policy-pods policy) using (hash-value entry)
+                do (destructuring-bind (isolated entries &rest rest) entry
+                     (declare (ignore rest))
+                     (setf (gethash address result)
+                           (core-object
+                            "isolated" (and isolated t)
+                            "entries" (coerce (loop for (cidr excepts ports) in entries
+                                                    unless (find #\: cidr)
+                                                      collect (core-object
+                                                               "cidr" cidr "excepts" (coerce excepts 'vector)
+                                                               "ports" (if (eq ports :all) "all"
+                                                                           (coerce (mapcar (lambda (range)
+                                                                                             (coerce (substitute 'null nil range) 'vector))
+                                                                                           ports)
+                                                                                   'vector))))
+                                              'vector))))))))
+    result))
+
+(defun start-browser-node-reporter (session store name &key pod-proxy runtime acceptor)
   "Tell SESSION's browser how its node NAME and the cluster are doing until it goes, and
 whether its Pods' ports are reachable through POD-PROXY; every +BROWSER-NODE-STATS-SECONDS+,
 ask it for RUNTIME's statistics, timing the answer."
@@ -505,6 +575,10 @@ ask it for RUNTIME's statistics, timing the answer."
            until (browser-session-closed session)
            do (handler-case (let ((info (browser-node-info store name)))
                               (setf (gethash "podProxy" info) (and pod-proxy t))
+                              (when (and acceptor runtime)
+                                (setf (gethash "peers" info) (browser-node-peers acceptor name)
+                                      (gethash "iceServers" info) (browser-join-ice-servers acceptor)
+                                      (gethash "ingressPolicy" info) (browser-node-ingress-policy runtime)))
                               (browser-session-send session info))
                 (error () (return)))
               (when (and runtime (zerop (mod tick (ceiling +browser-node-stats-seconds+ +browser-node-info-seconds+))))
@@ -544,6 +618,12 @@ who can reach the listener reaches those ports, so it is off unless asked for.")
 to a TAP device on this host (browser-network.lisp). It needs CAP_NET_ADMIN.")
    (images :initarg :images :initform nil :reader browser-join-images
            :documentation "The image cache browser Pods' layers come from, or NIL.")
+   (ice-servers :initarg :ice-servers :initform #() :reader browser-join-ice-servers
+                :documentation "ICE servers tabs use to reach each other (a vector of
+RTCIceServer objects); none by default, so tabs on one network connect directly and
+others go through this host.")
+   (holdings :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-holdings
+             :documentation "The layer digests each connected node holds, by node name.")
    (joins :initform 0 :accessor browser-join-joins
           :documentation "How many browsers have joined through this listener.")
    (sessions :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-sessions
@@ -612,10 +692,11 @@ reconnecting browser never shares its node with the session it replaces."
   (let ((old (gethash name (browser-join-sessions acceptor))))
     (when old
       ;; Closing it wouldn't wake the session's blocked read; this does.
-      (ignore-errors (stop-reading-websocket (browser-session-stream old)))
-      (loop repeat 100
-            while (member name (virtual-node-names (browser-join-nodes acceptor)) :test #'equal)
-            do (sleep 0.1)))))
+      (ignore-errors (stop-reading-websocket (browser-session-stream old))))
+    ;; A reloaded page closes its old session itself, whose node may still be stopping.
+    (loop repeat 150
+          while (member name (virtual-node-names (browser-join-nodes acceptor)) :test #'equal)
+          do (sleep 0.1))))
 
 (defun accept-browser-node (acceptor request)
   "Run one browser's session on REQUEST's upgraded connection: read its hello, make it a
@@ -676,14 +757,26 @@ stops with the session."
                                                               "podProxy" (and (browser-join-pod-proxy acceptor) t)))
                    (format t "gr8s browser node ~A joined~%" name)
                    (incf (browser-join-joins acceptor))
+                   (setf (browser-runtime-peer-handler runtime)
+                         (let ((from name))
+                           (lambda (message) (browser-peer-message acceptor from message)))
+                         (browser-runtime-layer-holders runtime)
+                         (let ((self name))
+                           (lambda (digest)
+                             (loop for node being the hash-keys of (browser-join-holdings acceptor)
+                                     using (hash-value digests)
+                                   when (and (not (equal node self)) (gethash node (browser-join-sessions acceptor))
+                                             (member digest digests :test #'equal))
+                                     collect node))))
                    (start-browser-node-reporter session (virtual-node-host-store host) name
                                                 :pod-proxy (browser-join-pod-proxy acceptor)
-                                                :runtime runtime)
+                                                :runtime runtime :acceptor acceptor)
                    (run-browser-session session))))
            (error (condition)
              (format *error-output* "gr8s browser node~@[ ~A~]: ~A~%" name condition)))
       (when (and name (eq session (gethash name (browser-join-sessions acceptor))))
-        (remhash name (browser-join-sessions acceptor)))
+        (remhash name (browser-join-sessions acceptor))
+        (remhash name (browser-join-holdings acceptor)))
       (when name
         (let ((runtime (gethash name (browser-join-runtimes acceptor))))
           (when (and runtime (browser-runtime-network runtime))

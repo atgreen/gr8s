@@ -120,6 +120,12 @@ or NIL when this process may not create devices (no CAP_NET_ADMIN), after saying
           (gr8s.network::add-network-address name (browser-network-gateway network)
                                              (browser-network-prefix network))
           (gr8s.network::set-network-link-up name)
+          ;; A host's firewalld would refuse forwarding to and from the device, as it
+          ;; would the overlay's: trust it, as gr8s does its overlay. Fail-soft, and only
+          ;; as root: anyone else's firewall-cmd asks polkit, which prompts a desktop user.
+          (ignore-errors
+           (when (and (zerop (sb-posix:geteuid)) (gr8s.network::host-firewalld-active-p))
+             (gr8s.network::host-firewall-run (list "firewall-cmd" "--zone" "trusted" "--add-interface" name))))
           (setf (browser-network-thread network)
                 (bt:make-thread
                  (lambda ()
@@ -156,6 +162,11 @@ or NIL when this process may not create devices (no CAP_NET_ADMIN), after saying
   (let ((fd (browser-network-fd network)))
     (setf (browser-network-fd network) nil)
     (when fd (ignore-errors (sb-unix:unix-close fd)))
+    (when (browser-network-device network)
+      (ignore-errors
+       (when (and (zerop (sb-posix:geteuid)) (gr8s.network::host-firewalld-active-p))
+         (gr8s.network::host-firewall-run
+          (list "firewall-cmd" "--zone" "trusted" "--remove-interface" (browser-network-device network))))))
     (let ((thread (browser-network-thread network)))
       (when (and thread (bt:thread-alive-p thread))
         (ignore-errors (bt:destroy-thread thread))))))
