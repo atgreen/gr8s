@@ -1079,6 +1079,29 @@
     (signals gr8s.network::cni-error
       (gr8s.agent::validate-node-network-object (node-network-with-routes-for-test routes)))))
 
+(defun node-network-with-hosted-routes-for-test (cidrs)
+  "A node network with one peer route carrying CIDRS: its own, then any it hosts."
+  (let ((network (node-network-with-routes-for-test '(("host" "10.88.9.0/24" "192.0.2.2")))))
+    (setf (gethash "podCIDRs" (aref (gethash "routes" network) 0)) (coerce cidrs 'vector))
+    network))
+
+(test node-network-accepts-a-peer-route-carrying-the-nodes-it-hosts
+  ;; A browser node's Pods are reached through the node hosting it, so the leader puts
+  ;; its CIDR on that node's route. Rejecting the route rejected the whole snapshot, and
+  ;; every agent's session ended and reconnected about once a second (podster-epec).
+  (let ((network (node-network-with-hosted-routes-for-test '("10.88.9.0/24" "10.88.12.0/24"))))
+    (is (eq network (gr8s.agent::validate-node-network-object network)))
+    (is (equal '(("10.88.9.0/24" . "192.0.2.2") ("10.88.12.0/24" . "192.0.2.2"))
+               (gr8s.network::node-vxlan-route-pairs network))))
+  ;; A hosted CIDR still has to be in range and overlap nothing: the node's own, the
+  ;; route's own, or another's.
+  (dolist (cidrs '(("10.88.9.0/24" "192.0.2.0/24")
+                   ("10.88.9.0/24" "10.88.8.128/25")
+                   ("10.88.9.0/24" "10.88.9.128/25")
+                   ("10.88.9.0/24" "10.88.12.0/24" "10.88.12.0/24")))
+    (signals gr8s.network::cni-error
+      (gr8s.agent::validate-node-network-object (node-network-with-hosted-routes-for-test cidrs)))))
+
 (test node-runtime-repairs-cached-topology-without-pods-or-a-control-connection
   (with-temporary-store (store path)
     (assert store)

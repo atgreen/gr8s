@@ -844,13 +844,19 @@ Signals INVALID-CNI on a malformed CIDR."
                     (address (required-cni-string route "underlayAddress")))
                (handler-case (canonical-node-underlay-address address)
                  (error () (invalid-cni "invalid peer underlay address ~A" address)))
-               (unless (and (= (length route-cidrs) (length cluster-cidrs))
+               ;; A route leads with the peer's own CIDR for each family, in order; after
+               ;; them come those of virtual nodes it hosts, such as browser nodes, whose
+               ;; Pods are reached through it (podster-epec). Each lies in the cluster's
+               ;; range and overlaps nothing else this node routes.
+               (unless (and (>= (length route-cidrs) (length cluster-cidrs))
                             (loop for cidr in route-cidrs
                                   for cluster-cidr in cluster-cidrs
-                                  always (and (pod-cidr-subnet-p cidr cluster-cidr)
-                                              (notany (lambda (other)
-                                                        (pod-cidrs-overlap-p cidr other))
-                                                      cidrs)))
+                                  always (pod-cidr-subnet-p cidr cluster-cidr))
+                            (loop for (cidr . rest) on route-cidrs
+                                  always (and (some (lambda (cluster-cidr) (pod-cidr-subnet-p cidr cluster-cidr))
+                                                    cluster-cidrs)
+                                              (notany (lambda (other) (pod-cidrs-overlap-p cidr other))
+                                                      (append rest cidrs))))
                             (not (member id node-ids :test #'string=))
                             (not (member address addresses :test #'string=)))
                  (invalid-cni "conflicting or out-of-range peer routes ~{~A~^, ~}"
