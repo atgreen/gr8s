@@ -3018,6 +3018,19 @@ that recover from some conditions, it runs only once the process is ending."
                      (reconciliation-deadline (reconciliation-worker-interval worker)))))
            (wait-for-reconciliation worker)))
 
+(defun reconciliation-leadership-fence (worker)
+  "(generation . still-leader-p) for work a pass starts that may outlive it:
+   STILL-LEADER-P is true only while WORKER keeps this pass's leadership."
+  (let ((generation (bt:with-lock-held ((reconciliation-worker-lock worker))
+                      (reconciliation-worker-leadership-generation worker))))
+    (cons generation
+          (lambda ()
+            (and (let ((gate (reconciliation-worker-leader-gate worker)))
+                   (or (null gate) (funcall gate)))
+                 (bt:with-lock-held ((reconciliation-worker-lock worker))
+                   (and (not (reconciliation-worker-stop-requested worker))
+                        (= generation (reconciliation-worker-leadership-generation worker)))))))))
+
 (defun gateway-reconciliation-admitted-p (worker)
   "Admit only against the repaired generation that survives the leadership check."
   (let ((generation (bt:with-lock-held ((reconciliation-worker-lock worker))
@@ -3554,7 +3567,8 @@ between later ones. An ordinary restart recovers within the first.")
                                       (run (collect-orphaned-custom-resources store))
                                       (run (reconcile-certificate-signing-requests store pki))
                                       (run (reconcile-pod-certificate-requests store pki))
-                                      (run (reconcile-certificates store pki))
+                                      (run (reconcile-certificates store pki
+                                                                  :leadership (reconciliation-leadership-fence worker)))
                                       (run (gr8s.controllers::ensure-egress-ca store))
                                       (run (reconcile-storage-bindings store))
                                       (run (reconcile-volume-attachments store))

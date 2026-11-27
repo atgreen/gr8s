@@ -27,6 +27,11 @@ the Kubernetes API version with a gr8s release suffix (see
   Ingress solvers and external account binding are rejected at admission.
   A Certificate's `renewBefore` must now be shorter than its `duration`, and one
   not shorter than the validity the issuer chose falls back to a third of it.
+  On a port, only the listener that wins a Challenge's host may answer it, and
+  only with the solver's `parentRefs`, which admission now requires. An ACME step
+  stops writing once its control plane stops leading. Durations parse as Go
+  writes them (`2160h0m0s`), and the `renewBefore` rule applies only when a
+  Certificate's spec changes.
 
 - Checked content from browser Pods (podster-23v9.8): a Service annotated
   `gr8s.io/verified-content-root: DIR` is served at `/verified/NAMESPACE/SERVICE/` on

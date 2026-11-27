@@ -22,12 +22,14 @@
     \"spec\":{\"secretName\":\"demo-tls\",\"issuerRef\":{\"name\":\"letsencrypt\",\"kind\":\"ClusterIssuer\"},
       \"dnsNames\":[\"demo.example.com\"]}}")
 
-(defun acme-challenge-object (&key (name "demo-1") (token "tok-1") (host "demo.example.com"))
+(defun acme-challenge-object (&key (name "demo-1") (token "tok-1") (host "demo.example.com") (namespace "certs"))
+  "A Challenge whose solver attaches to Gateway certs/web."
   (cm-parse (format nil "{\"apiVersion\":\"acme.cert-manager.io/v1\",\"kind\":\"Challenge\",
-    \"metadata\":{\"name\":\"~A\",\"namespace\":\"certs\"},
+    \"metadata\":{\"name\":\"~A\",\"namespace\":\"~A\"},
     \"spec\":{\"url\":\"https://acme.test/chall/1\",\"authorizationURL\":\"https://acme.test/authz/1\",
       \"dnsName\":\"~A\",\"type\":\"HTTP-01\",\"token\":\"~A\",\"key\":\"~A.thumb\",
-      \"issuerRef\":{\"name\":\"letsencrypt\",\"kind\":\"ClusterIssuer\"}}}" name host token token)))
+      \"solver\":{\"http01\":{\"gatewayHTTPRoute\":{\"parentRefs\":[{\"name\":\"web\",\"namespace\":\"certs\"}]}}},
+      \"issuerRef\":{\"name\":\"letsencrypt\",\"kind\":\"ClusterIssuer\"}}}" name namespace host token token)))
 
 (test acme-issuer-and-challenge-admission
   (with-core-api (store directory)
@@ -50,7 +52,12 @@
                                 (vector (cm-parse "{\"dns01\":{\"cloudflare\":{}}}")))))
       (bad (lambda (acme) (setf (gethash "solvers" acme)
                                 (vector (cm-parse "{\"http01\":{\"ingress\":{\"class\":\"nginx\"}}}")))))
-      (bad (lambda (acme) (setf (gethash "externalAccountBinding" acme) (cm-parse "{\"keyID\":\"k\"}")))))
+      (bad (lambda (acme) (setf (gethash "externalAccountBinding" acme) (cm-parse "{\"keyID\":\"k\"}"))))
+      ;; A solver route without parents attaches nowhere, so nothing would answer.
+      (bad (lambda (acme) (setf (gethash "solvers" acme)
+                                (vector (cm-parse "{\"http01\":{\"gatewayHTTPRoute\":{}}}")))))
+      (bad (lambda (acme) (setf (gethash "solvers" acme)
+                                (vector (cm-parse "{\"http01\":{\"gatewayHTTPRoute\":{\"parentRefs\":[]}}}"))))))
     ;; Challenge is served, and discovered, in its own group.
     (check-core-status 201 "/apis/acme.cert-manager.io/v1/namespaces/certs/challenges" :method :post
                        :object (acme-challenge-object))
@@ -144,11 +151,41 @@
                                                          "[{\"name\":\"web\",\"sectionName\":\"http\"}]"))))
     (is (null (ports (acme-gateway)
                      (acme-challenge-with-parents (acme-challenge-object) "[{\"name\":\"another\"}]"))))
+    ;; No parentRefs: the solver route attaches nowhere, so nothing answers.
+    (let ((orphan (acme-challenge-object)))
+      (remhash "solver" (gethash "spec" orphan))
+      (is (null (ports (acme-gateway :from "All") orphan))))
     ;; A Gateway of another controller is not ours to answer on.
     (let ((class (acme-gateway-class)))
       (setf (gethash "controllerName" (gethash "spec" class)) "example.com/other")
       (is (zerop (hash-table-count (gr8s.controllers::gateway-acme-challenge-table
                                     (acme-gateway-view class (acme-gateway) (acme-challenge-object)))))))))
+
+(test acme-challenges-answer-on-the-listener-that-wins-the-host
+  ;; One shared Gateway: L1 serves any host to any namespace; L2 serves only
+  ;; victim.example.com, to its own namespace. Requests for victim.example.com
+  ;; reach L2, so L1's broad admission must not answer for that host.
+  (let ((gateway (cm-parse "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"Gateway\",
+          \"metadata\":{\"name\":\"web\",\"namespace\":\"certs\"},
+          \"spec\":{\"gatewayClassName\":\"gr8s\",\"listeners\":[
+            {\"name\":\"l1\",\"port\":80,\"protocol\":\"HTTP\",
+             \"allowedRoutes\":{\"namespaces\":{\"from\":\"All\"}}},
+            {\"name\":\"l2\",\"port\":80,\"protocol\":\"HTTP\",\"hostname\":\"victim.example.com\",
+             \"allowedRoutes\":{\"namespaces\":{\"from\":\"Same\"}}}]}}")))
+    (flet ((answered-p (challenge)
+             (let ((table (gr8s.controllers::gateway-acme-challenge-table
+                           (acme-gateway-view (acme-gateway-class) gateway challenge))))
+               (and (gethash 80 table) (gethash "tok-1" (gethash 80 table)) t))))
+      ;; A tenant elsewhere: not for the victim's host, which L2 wins...
+      (is (not (answered-p (acme-challenge-object :namespace "intruder" :host "victim.example.com"))))
+      ;; ...but yes for a host only L1 serves.
+      (is (answered-p (acme-challenge-object :namespace "intruder" :host "tenant.example.net")))
+      ;; The victim's own namespace is admitted by L2.
+      (is (answered-p (acme-challenge-object :host "victim.example.com")))
+      ;; Naming L1 by sectionName doesn't help: L2 still serves the host.
+      (is (not (answered-p (acme-challenge-with-parents
+                            (acme-challenge-object :namespace "intruder" :host "victim.example.com")
+                            "[{\"name\":\"web\",\"namespace\":\"certs\",\"sectionName\":\"l1\"}]")))))))
 
 (test gateway-listener-answers-acme-http01-before-routing
   (let* ((router (lambda (&rest arguments) (declare (ignore arguments)) nil))
@@ -250,10 +287,16 @@
    (wrong-key :initarg :wrong-key :initform nil :accessor fake-acme-wrong-key)
    (csr :initform nil :accessor fake-acme-csr)
    (defer :initform nil :accessor fake-acme-defer)
-   (defer-authorization :initform nil :accessor fake-acme-defer-authorization)))
+   (defer-authorization :initform nil :accessor fake-acme-defer-authorization)
+   (registrations :initform 0 :accessor fake-acme-registrations)
+   (account-delay :initform nil :accessor fake-acme-account-delay)
+   (on-new-order :initform nil :accessor fake-acme-on-new-order)
+   (lock :initform (bt:make-lock "fake ACME") :reader fake-acme-lock)))
 
 (defmethod gr8s.controllers::cm-acme-account ((acme fake-acme) server email key &key skip-tls-verify)
   (declare (ignore server email key skip-tls-verify))
+  (when (fake-acme-account-delay acme) (sleep (fake-acme-account-delay acme)))
+  (bt:with-lock-held ((fake-acme-lock acme)) (incf (fake-acme-registrations acme)))
   (values :client "https://acme.test/acct/1"))
 
 (defmethod gr8s.controllers::cm-acme-new-order ((acme fake-acme) client domains profile)
@@ -261,7 +304,8 @@
   (when (fake-acme-defer acme)
     (error 'gr8s.controllers::cm-acme-deferred :seconds (shiftf (fake-acme-defer acme) nil)))
   (assert (equal '("demo.example.com") domains))
-  (incf (fake-acme-orders acme))
+  (bt:with-lock-held ((fake-acme-lock acme)) (incf (fake-acme-orders acme)))
+  (when (fake-acme-on-new-order acme) (funcall (fake-acme-on-new-order acme)))
   (setf (fake-acme-responded acme) nil (fake-acme-csr acme) nil)
   (values '((:status . "pending") (:finalize . "https://acme.test/finalize/1")
             (:authorizations "https://acme.test/authz/1"))
@@ -439,7 +483,7 @@
         (reconcile-after)
         (is (= 0 (fake-acme-orders acme)))
         (let ((status (gethash "status" (gr8s.resources::get-core-resource store "certificates" "certs" "demo"))))
-          (is (null (and (hash-table-p status) (gethash "failedIssuanceAttempts" status)))))
+          (is (null (if (hash-table-p status) (gethash "failedIssuanceAttempts" status) nil))))
         (reconcile-after 10)
         (is (= 0 (fake-acme-orders acme)))
         (reconcile-after 21)
@@ -581,3 +625,71 @@
       (is (= 1 (length (gr8s.resources::list-core-resources store "challenges" "certs"))))
       (is (= 1 (length (gr8s.controllers::cm-acme-order-challenges
                         (first (alexandria:hash-table-values gr8s.controllers::*cm-acme-orders*)))))))))
+
+(test acme-steps-stop-writing-once-leadership-ends
+  (with-temporary-store (store path)
+    (values path)
+    (with-fake-acme (acme clock)
+      (let ((leader t))
+        (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *acme-issuer*) nil)
+        (gr8s.resources::create-core-resource store "certificates" (cm-parse *acme-certificate*) "certs")
+        ;; Demoted while the step talks to the server: it writes nothing after.
+        (setf (fake-acme-on-new-order acme) (lambda () (setf leader nil)))
+        (gr8s.controllers::reconcile-certificates store nil :leadership (cons 1 (lambda () leader)))
+        (is (= 1 (fake-acme-orders acme)))
+        (is (null (gr8s.resources::list-core-resources store "challenges")))
+        (let ((status (gethash "status" (gr8s.resources::get-core-resource store "certificates" "certs" "demo"))))
+          (is (null (if (hash-table-p status) (gethash "failedIssuanceAttempts" status) nil))))
+        (is (zerop (hash-table-count gr8s.controllers::*cm-acme-orders*)))
+        ;; Leadership regained (a new generation): orders start over cleanly.
+        (setf (fake-acme-on-new-order acme) nil leader t)
+        (gr8s.controllers::reconcile-certificates store nil :leadership (cons 2 (lambda () leader)))
+        (is (= 1 (length (gr8s.resources::list-core-resources store "challenges" "certs"))))
+        (is (= 1 (hash-table-count gr8s.controllers::*cm-acme-orders*)))
+        ;; Another generation drops that order: the next one starts afresh and
+        ;; replaces its Challenge rather than adding to it.
+        (gr8s.controllers::reconcile-certificates store nil :leadership (cons 3 (lambda () leader)))
+        (is (= 3 (fake-acme-orders acme)))
+        (is (= 1 (length (gr8s.resources::list-core-resources store "challenges" "certs"))))))))
+
+(test acme-steps-for-one-issuer-register-once
+  (with-temporary-store (store path)
+    (values path)
+    (with-fake-acme (acme clock)
+      (setf (fake-acme-account-delay acme) 0.3)
+      (let* ((threads '())
+             (gr8s.controllers::*cm-acme-run-step*
+               (lambda (thunk) (push (bt:make-thread thunk :name "test ACME step") threads))))
+        (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *acme-issuer*) nil)
+        (dolist (name '("demo" "demo-two"))
+          (let ((certificate (cm-parse *acme-certificate*)))
+            (setf (gethash "name" (gethash "metadata" certificate)) name
+                  (gethash "secretName" (gethash "spec" certificate)) (format nil "~A-tls" name))
+            (gr8s.resources::create-core-resource store "certificates" certificate "certs")))
+        (gr8s.controllers::reconcile-certificates store nil)
+        (mapc #'bt:join-thread threads)
+        (is (= 2 (length threads)))
+        (is (= 1 (fake-acme-registrations acme)))
+        (is (= 2 (fake-acme-orders acme)))))))
+
+(test certificate-durations-parse-as-go-writes-them
+  (loop for (text seconds) in '(("2160h0m0s" 7776000) ("1h30m" 5400) ("1.5h" 5400) ("90d" 7776000)
+                                ("45m" 2700) ("10s" 10) ("1h0m30.5s" 3630) ("3600" 3600) (3600 3600)
+                                ("500ms" nil) ("0s" nil) ("-1h" nil) ("1h30" nil) ("h" nil) ("1x" nil)
+                                ("1..5h" nil) ("" nil))
+        do (is (eql seconds (gr8s.resources::certificate-duration-seconds text)) "~S" text)))
+
+(test certificate-status-writes-survive-a-rule-added-after-admission
+  ;; A Certificate admitted before renewBefore < duration was enforced keeps
+  ;; taking status writes; changing its spec has to satisfy the rule.
+  (let* ((certificate (cm-parse *acme-certificate*))
+         (spec (gethash "spec" certificate)))
+    (setf (gethash "duration" spec) "24h" (gethash "renewBefore" spec) "48h")
+    (finishes (gr8s.resources::validate-cert-manager-resource
+               "certificates" certificate (gr8s.resources::copy-core-object spec)))
+    (signals gr8s.resources::kubernetes-error
+      (gr8s.resources::validate-cert-manager-resource "certificates" certificate))
+    (let ((older (gr8s.resources::copy-core-object spec)))
+      (setf (gethash "renewBefore" older) "8h")
+      (signals gr8s.resources::kubernetes-error
+        (gr8s.resources::validate-cert-manager-resource "certificates" certificate older)))))

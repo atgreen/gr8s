@@ -311,10 +311,19 @@
 (defvar *cm-acme-active* nil
   "During a reconcile pass, the UIDs of Certificates the acme issuer is working on.")
 
-(defun reconcile-certificates (store pki)
+(defvar *cm-acme-fence* (constantly t)
+  "True while the leadership a pass began under still holds. ACME step threads
+   carry the pass's fence and check it before every store write.")
+
+(defun reconcile-certificates (store pki &key leadership)
   "Control-plane reconcile: issue/renew every Certificate whose Secret is missing
-   or due. Fail-soft per Certificate, like the other control-plane reconcilers."
-  (let ((*cm-acme-active* '()))
+   or due. Fail-soft per Certificate, like the other control-plane reconcilers.
+   LEADERSHIP, from the HA control plane, is (generation . still-leader-p): the
+   acme issuer's background steps stop writing once it no longer holds."
+  (let ((*cm-acme-active* '())
+        (*cm-acme-fence* (if leadership (cdr leadership) (constantly t))))
+    (when leadership
+      (cm-acme-note-leadership (car leadership)))
     (dolist (certificate (list-core-resources store "certificates"))
       (handler-case
           (when (cm-certificate-needs-issue-p store certificate)

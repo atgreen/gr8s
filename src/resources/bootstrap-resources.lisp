@@ -183,17 +183,48 @@
          (when hostnames
            (bootstrap-string-array hostnames "spec.hostnames")))))))
 
+(defparameter +certificate-duration-units+
+  `(("ns" . 1/1000000000) ("us" . 1/1000000) (,(format nil "~Cs" (code-char #xB5)) . 1/1000000)
+    (,(format nil "~Cs" (code-char #x3BC)) . 1/1000000) ("ms" . 1/1000)
+    ("s" . 1) ("m" . 60) ("h" . 3600) ("d" . 86400))
+  "Go time.ParseDuration's units, in seconds, plus the d that gr8s has accepted.")
+
 (defun certificate-duration-seconds (value)
-  "Parse a cert-manager/Go-ish duration (e.g. \"2160h\", \"30m\", \"10s\", \"90d\")
-   or a plain integer number of seconds. Returns seconds, or NIL."
-  (cond ((integerp value) value)
-        ((and (stringp value) (plusp (length value)))
-         (multiple-value-bind (n end) (ignore-errors (parse-integer value :junk-allowed t))
-           (when (and n (plusp n))
-             (case (char value (1- (length value)))
-               (#\h (* n 3600)) (#\m (* n 60)) (#\s n) (#\d (* n 86400))
-               (t (and (eql end (length value)) n))))))
-        (t nil)))
+  "Parse a Go duration as cert-manager writes them (\"2160h0m0s\", \"1h30m\",
+   \"1.5h\", \"500ms\"; also \"90d\") or a plain integer number of seconds.
+   Returns whole seconds when positive, or NIL for anything else."
+  (let ((seconds
+          (cond ((integerp value) value)
+                ((and (stringp value) (plusp (length value)))
+                 (if (every #'digit-char-p value)
+                     (parse-integer value)
+                     (let ((position 0) (total 0) (length (length value)))
+                       (loop while (< position length)
+                             do (let* ((start position)
+                                       (digits-end (or (position-if-not (lambda (c) (or (digit-char-p c) (char= c #\.)))
+                                                                        value :start start)
+                                                       length))
+                                       (number-text (subseq value start digits-end))
+                                       (unit-end (or (position-if (lambda (c) (or (digit-char-p c) (char= c #\.)))
+                                                                  value :start digits-end)
+                                                     length))
+                                       (unit (cdr (assoc (subseq value digits-end unit-end)
+                                                         +certificate-duration-units+ :test #'string=)))
+                                       (dot (position #\. number-text)))
+                                  (when (or (null unit) (zerop (length number-text))
+                                            (and dot (or (find #\. number-text :start (1+ dot))
+                                                         (= (length number-text) 1))))
+                                    (return-from certificate-duration-seconds nil))
+                                  (incf total (* unit (if dot
+                                                          (+ (if (plusp dot) (parse-integer number-text :end dot) 0)
+                                                             (if (< (1+ dot) (length number-text))
+                                                                 (/ (parse-integer number-text :start (1+ dot))
+                                                                    (expt 10 (- (length number-text) dot 1)))
+                                                                 0))
+                                                          (parse-integer number-text))))
+                                  (setf position unit-end)))
+                       (floor total)))))))
+    (and (integerp seconds) (plusp seconds) seconds)))
 
 (defun validate-acme-issuer-spec (acme)
   "The ACME issuer gr8s implements: an https directory, an account key Secret and
@@ -223,11 +254,19 @@
                (core-resource-error 422 "Invalid" "spec.acme.solvers[].dns01 is not implemented"))
              (unless (and (hash-table-p http01) (hash-table-p (gethash "gatewayHTTPRoute" http01)))
                (core-resource-error 422 "Invalid"
-                                    "spec.acme.solvers[] must configure http01.gatewayHTTPRoute; other solvers are not implemented")))))
+                                    "spec.acme.solvers[] must configure http01.gatewayHTTPRoute; other solvers are not implemented"))
+             ;; A solver route with no parents attaches to no listener, so nothing would answer.
+             (let ((refs (gethash "parentRefs" (gethash "gatewayHTTPRoute" http01))))
+               (unless (and (vectorp refs) (not (stringp refs)) (plusp (length refs))
+                            (every (lambda (ref) (and (hash-table-p ref) (stringp (gethash "name" ref)))) refs))
+                 (core-resource-error 422 "Invalid"
+                                      "spec.acme.solvers[].http01.gatewayHTTPRoute.parentRefs must name at least one Gateway"))))))
 
-(defun validate-cert-manager-resource (resource object)
+(defun validate-cert-manager-resource (resource object &optional old-spec)
   "Validate a cert-manager.io/v1 object against the subset gr8s implements. Fails
-   closed (422) on unsupported issuer types or missing required fields."
+   closed (422) on unsupported issuer types or missing required fields. OLD-SPEC
+   is the stored spec on update: rules added since an object was admitted apply
+   only when its spec changes, so status writes to it still land."
   (let ((spec (gethash "spec" object)))
     (unless (hash-table-p spec)
       (core-resource-error 422 "Invalid" "~A spec must be an object"
@@ -271,7 +310,8 @@
          ;; cert-manager's rule; the 90d default duration applies when it is absent.
          (let ((duration (or (certificate-duration-seconds (gethash "duration" spec)) (* 90 24 60 60)))
                (renew-before (certificate-duration-seconds (gethash "renewBefore" spec))))
-           (when (and renew-before (>= renew-before duration))
+           (when (and renew-before (>= renew-before duration)
+                      (not (and old-spec (core-json-equal-p old-spec spec))))
              (core-resource-error 422 "Invalid" "spec.renewBefore must be shorter than spec.duration")))
          (unless (or (plusp alt-names)
                      (and (stringp common-name) (plusp (length common-name))))
@@ -466,7 +506,10 @@
          (normalize-gateway-status resource object name namespace store)))
       ((member resource '("issuers" "clusterissuers" "certificates" "certificaterequests" "challenges")
                :test #'equal)
-       (validate-cert-manager-resource resource object))
+       (validate-cert-manager-resource
+        resource object
+        (let ((old (and store name (ignore-errors (get-core-resource store resource namespace name)))))
+          (and old (gethash "spec" old)))))
       ((equal resource "clustertrustbundles")
        (let ((spec (gethash "spec" object)))
          (when (and spec (not (hash-table-p spec)))
