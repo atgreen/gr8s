@@ -257,6 +257,10 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- Pods on browser nodes reach Services by ClusterIP (podster-kw5u). Connections to
+  one timed out: nothing translated the address for a Pod in a tab, and the server
+  judged egress policy against the ClusterIP. The tab now translates, asking the
+  server for a Service port's backends when a Pod first uses it.
 - A browser tab no longer retries a direct link to a peer it can't reach on every
   packet (podster-99q4): after a failure it waits 10 s, doubling up to 10 minutes,
   and meanwhile sends that peer's traffic and layer requests through the server

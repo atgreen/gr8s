@@ -229,6 +229,16 @@ podster-135e and podster-i8my) still help native nodes.
   projection the nodes get, with a userspace flow table for replies. It also drops any
   frame whose source isn't an address the server gave one of that browser's Pods.
   Flow events for browser Pods are not recorded yet.
+- **Services** (podster-kw5u). A native node translates a ClusterIP where the Pod's
+  socket connects; a browser Pod's sockets are in its VM, so its tab translates. The
+  server tells each tab the Service ranges, and when a Pod first connects to an address
+  in one, the tab asks the server for that Service port's ready backends, holding the
+  packet until the answer comes, and keeps the answer for 5 s. Each connection keeps
+  its backend; its packets are rewritten to it on the way out, and its replies back to
+  the ClusterIP on the way in, whether they came through the server, a peer or another
+  Pod in the tab. So Service traffic takes direct links too, and the server's egress
+  policy judges the backend, as a native node's does. A tab learns the backends only
+  of the Services its Pods use. Session affinity isn't kept.
 - **DNS.** Each container root gets the kubelet's `/etc/resolv.conf` (the hosting
   node's 169.254.1.1, searches from the Pod's namespace) and an `/etc/hosts`.
 - **Images** (`src/server/browser-images.lisp`). Not erofs: the server resolves the

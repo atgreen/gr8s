@@ -991,6 +991,17 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       attach: (kernel) => { nic.kernel = kernel; },
       send: (frame) => services.out(new Uint8Array(frame), (frame) => {
         frame = finishChecksum(frame);
+        // A Service's backend in this tab: the frame came for the gateway, so switch it
+        // to that Pod's NIC here, as a native node delivers to a local backend.
+        if (frame.length >= 34 && frame[12] === 0x08 && frame[13] === 0x00) {
+          const address = `${frame[30]}.${frame[31]}.${frame[32]}.${frame[33]}`;
+          const local = [...pods.values()].find((pod) => pod.nic && pod.request.network?.address === address)?.nic;
+          if (local && local !== nic) {
+            frame.set(local.mac, 0);
+            deliver(frame, nic);
+            return;
+          }
+        }
         if (peering.send(frame)) return;
         if (socket.readyState === 1) socket.send(frame);
         deliver(frame, nic);
