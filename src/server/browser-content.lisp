@@ -208,13 +208,30 @@ of path -> hex digest. Computed from the cached layers once and remembered."
        (concatenate 'vector (gr8s.model::node-record-taints record)
                     (vector (apply #'core-object +browser-tampered-taint+)))))))
 
-(defun fetch-browser-pod (address port path)
-  "GET PATH from the Pod at ADDRESS:PORT over the Pod network: (values status body
-content-type), the body as octets and no larger than the limit."
+(defun browser-content-forwarded-headers (header client-address)
+  "What checked content tells a browser Pod about the visitor, as (name . value) headers,
+as a reverse proxy would: Referer, Accept-Language and how and where the request came in;
+with CLIENT-ADDRESS, the visitor's address as X-Forwarded-For and X-Real-IP. HEADER gives
+a header of the visitor's request by keyword, or NIL. The User-Agent goes separately."
+  (append
+   (loop for (key name) in '((:referer "Referer") (:accept-language "Accept-Language")
+                             (:x-forwarded-proto "X-Forwarded-Proto"))
+         for value = (funcall header key)
+         when value collect (cons name value))
+   (let ((host (or (funcall header :x-forwarded-host) (funcall header :host))))
+     (when host (list (cons "X-Forwarded-Host" host))))
+   (when client-address
+     (list (cons "X-Forwarded-For" client-address) (cons "X-Real-IP" client-address)))))
+
+(defun fetch-browser-pod (address port path &key user-agent headers)
+  "GET PATH from the Pod at ADDRESS:PORT over the Pod network, sending USER-AGENT and
+HEADERS for the visitor: (values status body content-type), the body as octets and no
+larger than the limit."
   (multiple-value-bind (stream status headers)
       (drakma:http-request (format nil "http://~A:~D~A" address port path)
                            :want-stream t :force-binary t :redirect nil :connection-timeout 10
-                           :additional-headers '(("Accept-Encoding" . "identity")))
+                           :user-agent (or user-agent :drakma)
+                           :additional-headers (cons '("Accept-Encoding" . "identity") headers))
     (unwind-protect
          (let ((body (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
                (buffer (make-array 16384 :element-type '(unsigned-byte 8))))
@@ -262,7 +279,13 @@ node, when it is anything else."
                  (file (browser-content-file root request-path))
                  (expected (gethash file files)))
             (multiple-value-bind (status body content-type)
-                (handler-case (fetch-browser-pod address port request-path)
+                (handler-case (fetch-browser-pod
+                               address port request-path
+                               :user-agent (hunchentoot:header-in :user-agent request)
+                               :headers (browser-content-forwarded-headers
+                                         (lambda (name) (hunchentoot:header-in name request))
+                                         (and (browser-join-forward-client-address acceptor)
+                                              (browser-join-client-address acceptor request))))
                   (error (condition) (fail 502 (format nil "the browser didn't answer: ~A" condition))))
               (let ((digest (ironclad:byte-array-to-hex-string (ironclad:digest-sequence :sha256 body))))
                 (cond ((and (null expected) (= status 404))

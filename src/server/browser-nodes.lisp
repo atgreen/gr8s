@@ -716,6 +716,10 @@ others go through this host.")
             :documentation "Which tabs may connect to each other directly, and so learn each
 other's public address: :all, :same-network (tabs whose browsers come from one client
 address) or :none. Tabs that may not still reach each other through this server.")
+   (forward-client-address :initarg :forward-client-address :initform t
+                           :reader browser-join-forward-client-address
+                           :documentation "Whether checked content tells a browser Pod the visitor's address.
+Its tab's owner reads the Pod's logs: a cluster whose tabs are strangers' keeps it from them.")
    (stun :initform nil :accessor browser-join-stun
          :documentation "The STUN responder tabs learn their public addresses from, or NIL.")
    (exec-listener :initform nil :accessor browser-join-exec-listener
@@ -1117,16 +1121,19 @@ process hosts none."
 
 (defun start-browser-join-listener (nodes address port &key distro pod-proxy pod-network images
                                                              (max-nodes 64) (max-per-client 4)
-                                                             (peering :same-network) ice-servers stun)
+                                                             (peering :same-network) ice-servers stun
+                                                             (forward-client-address t))
   "Listen on ADDRESS:PORT for browsers joining as nodes on NODES, serving the join page and
 DISTRO, the root image file Pods boot from, and with POD-PROXY, HTTP to their Pods. With
 POD-NETWORK, their Pods join the cluster network through this host. At most MAX-NODES are
 connected at once, MAX-PER-CLIENT of them from one address. PEERING says which tabs connect
 directly; they find each other with ICE-SERVERS (URLs) and, with STUN, (address port), a
-STUN responder this listener runs. Returns the acceptor."
+STUN responder this listener runs. FORWARD-CLIENT-ADDRESS says whether checked content tells
+a browser Pod the visitor's address. Returns the acceptor."
   (let ((acceptor (make-instance 'browser-join-acceptor
                                     :address address :port port :nodes nodes :pod-proxy pod-proxy
                                     :max-nodes max-nodes :max-per-client max-per-client :peering peering
+                                    :forward-client-address forward-client-address
                                     :ice-servers (map 'vector (lambda (url) (core-object "urls" url)) ice-servers)
                                     :pod-network pod-network
                                     :images (and images (make-browser-images images))
