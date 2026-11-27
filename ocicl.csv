@@ -102,5 +102,5 @@ usocket, ghcr.io/ocicl/usocket@sha256:282856b819b22a4319ba30a15605ee934aa23292a4
 usocket-server, ghcr.io/ocicl/usocket@sha256:282856b819b22a4319ba30a15605ee934aa23292a471fd29ea4d3f2074b3f16d, usocket-0.8.8/usocket-server.asd
 usocket-test, ghcr.io/ocicl/usocket@sha256:282856b819b22a4319ba30a15605ee934aa23292a471fd29ea4d3f2074b3f16d, usocket-0.8.8/usocket-test.asd
 version-string, ghcr.io/ocicl/version-string@sha256:eb8f45786af7fd6f792aecada1f905870f1d79abfaee0ceb774a94824ad9b14f, cl-version-string-20251228-668f2fa/version-string.asd
-whistler, ghcr.io/ocicl/whistler@sha256:f21c0e72c94032a5c603ac9d0e87cb137735cf27494273c61cfa9e6d55c6afa0, whistler-20261110-c73f6ec/whistler.asd
+whistler, ghcr.io/ocicl/whistler@sha256:6afd8727e4e8701ef64fc2a4ab82928d865b6e11669b31263c08b128e3748afa, whistler-20261127-6931d52/whistler.asd
 with-user-abort, ghcr.io/ocicl/with-user-abort@sha256:c19560034f9909a7afb4110b5efd939a9f1e829d9ef9887797b98679f290c480, with-user-abort-20240503-a3db02e/with-user-abort.asd
