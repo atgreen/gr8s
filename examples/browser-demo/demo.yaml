@@ -1,7 +1,13 @@
 # demo.gr8s.io, as deployed: a single-node `gr8s serve` whose browser join listener
-# (--browser-listen 78.18.12.235:8099 --browser-distro ...) sits behind the Gateway.
-# Visitors' tabs join at https://demo.gr8s.io/ and each runs the page in this
-# directory, which https://tab.demo.gr8s.io/ serves after checking it against the image.
+# (--browser-listen 78.18.12.235:8099 --browser-distro ... --browser-peering all
+# --browser-forward-client-address false) sits behind the Gateway.
+#   https://demo.gr8s.io/       the overview page in site/, served from the demo's own node
+#   https://join.demo.gr8s.io/  the join page: a tab that opens it becomes a node
+#   https://tabs.demo.gr8s.io/  the page in www/, which every tab serves, checked by the server
+#   https://gr8s.io/            redirects to demo.gr8s.io
+# The overview's files are a ConfigMap, made from site/ before applying this:
+#   kubectl -n demo create configmap demo-site --from-file=index.html=site/index.html \
+#     --from-file=nginx.conf=site-nginx.conf --dry-run=client -o yaml | kubectl apply -f -
 # For another host, change the hostnames, the EndpointSlice address and the email.
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
@@ -32,6 +38,20 @@ spec:
     hostname: "*.demo.gr8s.io"
     tls: {mode: Terminate, certificateRefs: [{name: demo-tls}]}
     allowedRoutes: {namespaces: {from: Same}}
+  - {name: http-root, protocol: HTTP, port: 80, hostname: gr8s.io, allowedRoutes: {namespaces: {from: Same}}}
+  - {name: http-www, protocol: HTTP, port: 80, hostname: www.gr8s.io, allowedRoutes: {namespaces: {from: Same}}}
+  - name: https-root
+    protocol: HTTPS
+    port: 443
+    hostname: gr8s.io
+    tls: {mode: Terminate, certificateRefs: [{name: demo-tls}]}
+    allowedRoutes: {namespaces: {from: Same}}
+  - name: https-www
+    protocol: HTTPS
+    port: 443
+    hostname: www.gr8s.io
+    tls: {mode: Terminate, certificateRefs: [{name: demo-tls}]}
+    allowedRoutes: {namespaces: {from: Same}}
 ---
 # Let's Encrypt over HTTP-01, answered by the Gateway's port-80 listeners.
 apiVersion: cert-manager.io/v1
@@ -52,7 +72,7 @@ kind: Certificate
 metadata: {name: demo, namespace: demo}
 spec:
   secretName: demo-tls
-  dnsNames: [demo.gr8s.io, tab.demo.gr8s.io]
+  dnsNames: [demo.gr8s.io, join.demo.gr8s.io, tabs.demo.gr8s.io, tab.demo.gr8s.io, gr8s.io, www.gr8s.io]
   issuerRef: {name: letsencrypt, kind: ClusterIssuer}
 ---
 # Plain HTTP only redirects (ACME challenges are answered before this).
@@ -60,8 +80,52 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata: {name: to-https, namespace: demo}
 spec:
-  parentRefs: [{name: demo, sectionName: http-apex}, {name: demo, sectionName: http-sub}]
+  parentRefs: [{name: demo, sectionName: http-apex}, {name: demo, sectionName: http-sub},
+               {name: demo, sectionName: http-root}, {name: demo, sectionName: http-www}]
   rules: [{filters: [{type: RequestRedirect, requestRedirect: {scheme: https, statusCode: 301}}]}]
+---
+# gr8s.io is the demo.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: to-demo, namespace: demo}
+spec:
+  parentRefs: [{name: demo, sectionName: https-root}, {name: demo, sectionName: https-www}]
+  rules: [{filters: [{type: RequestRedirect, requestRedirect: {hostname: demo.gr8s.io, statusCode: 301}}]}]
+---
+# The overview page, from the demo's own node.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: overview, namespace: demo}
+spec:
+  selector: {matchLabels: {app: overview}}
+  template:
+    metadata: {labels: {app: overview}}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: demo}
+      automountServiceAccountToken: false
+      containers:
+      - name: web
+        image: quay.io/hummingbird/nginx:latest
+        ports: [{containerPort: 8080}]
+        volumeMounts:
+        - {name: site, mountPath: /usr/share/nginx/html/index.html, subPath: index.html}
+        - {name: site, mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf}
+      volumes: [{name: site, configMap: {name: demo-site}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: overview, namespace: demo}
+spec:
+  selector: {app: overview}
+  ports: [{name: http, port: 80, targetPort: 8080}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: overview, namespace: demo}
+spec:
+  parentRefs: [{name: demo, sectionName: https-apex}]
+  hostnames: [demo.gr8s.io]
+  rules: [{backendRefs: [{name: overview, port: 80}]}]
 ---
 # The join page and sessions: serve's --browser-listen on this host.
 apiVersion: v1
@@ -84,8 +148,8 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata: {name: join, namespace: demo}
 spec:
-  parentRefs: [{name: demo, sectionName: https-apex}]
-  hostnames: [demo.gr8s.io]
+  parentRefs: [{name: demo, sectionName: https-sub}]
+  hostnames: [join.demo.gr8s.io]
   rules: [{backendRefs: [{name: join, port: 80}]}]
 ---
 # Every visitor's tab runs the page's web server.
@@ -102,7 +166,7 @@ spec:
       automountServiceAccountToken: false
       containers:
       - name: web
-        image: ghcr.io/atgreen/gr8s-browser-demo:2
+        image: ghcr.io/atgreen/gr8s-browser-demo:3
         ports: [{containerPort: 8080}]
 ---
 # What those tabs serve is checked against the image's nginx root before anyone sees it.
@@ -121,10 +185,19 @@ kind: HTTPRoute
 metadata: {name: tab-web, namespace: demo}
 spec:
   parentRefs: [{name: demo, sectionName: https-sub}]
-  hostnames: [tab.demo.gr8s.io]
+  hostnames: [tabs.demo.gr8s.io]
   rules:
   - filters: [{type: URLRewrite, urlRewrite: {path: {type: ReplacePrefixMatch, replacePrefixMatch: /verified/demo/tab-web/}}}]
     backendRefs: [{name: join, port: 80}]
+---
+# The page's first address.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: tab-to-tabs, namespace: demo}
+spec:
+  parentRefs: [{name: demo, sectionName: https-sub}]
+  hostnames: [tab.demo.gr8s.io]
+  rules: [{filters: [{type: RequestRedirect, requestRedirect: {hostname: tabs.demo.gr8s.io, statusCode: 301}}]}]
 ---
 # Visitors control their tabs, so a Pod there can send whatever it likes. Pods in this
 # namespace reach only each other and cluster DNS: never the internet, so the host's
@@ -133,7 +206,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: {name: no-internet, namespace: demo}
 spec:
-  podSelector: {}
+  podSelector: {matchLabels: {app: tab-web}}
   policyTypes: [Egress]
   egress:
   - to: [{podSelector: {}}]
