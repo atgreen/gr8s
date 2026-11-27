@@ -86,6 +86,7 @@
     <nav>
       <a href="#gr8s">What is gr8s?</a>
       <a href="#how">How it works</a>
+      <a href="#tab">In your tab</a>
       <a href="#p2p">Peer to peer</a>
       <a href="#checked">Checked content</a>
       <a href="#safety">Safety and privacy</a>
@@ -231,6 +232,22 @@
       <figcaption>Every Pod has a real cluster address. Its packets leave the VM, pass through the tab's own switch,
         and go straight to another tab or up the WebSocket to the server.</figcaption>
     </figure>
+  </section>
+
+  <section id="tab">
+    <h2>What runs in your tab</h2>
+    <p>The sample app is an ordinary container image: <a href="https://github.com/atgreen/gr8s/tree/main/examples/browser-demo">a
+      small page</a> on <a href="https://hummingbird-project.io/">Project Hummingbird</a>'s minimal, hardened nginx,
+      the same build Red Hat ships, for ARM64 (<code>linux/arm64</code>). Nothing about it is made for browsers.</p>
+    <div class="grid2">
+      <div class="card"><h3>A Linux kernel, compiled to WebAssembly</h3><p>Each Pod boots its own
+        <a href="https://github.com/pithings/unkernel">unkernel</a>: Linux itself, built as one WebAssembly module.
+        Its scheduler, memory management, file systems and TCP/IP run as compiled code, not emulated, so nginx gets
+        Linux's own behaviour.</p></div>
+      <div class="card"><h3>ARM64 programs, JIT-compiled to WebAssembly</h3><p>The image's programs are unmodified
+        ARM64 binaries. An ARM64 CPU built into that kernel runs them, and compiles their hot code to WebAssembly
+        as they run, so the nginx you get a page from is the very binary in the image.</p></div>
+    </div>
   </section>
 
   <section id="p2p">
