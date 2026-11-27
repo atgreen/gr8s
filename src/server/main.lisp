@@ -3409,7 +3409,11 @@ between later ones. An ordinary restart recovers within the first.")
                (setf virtual-nodes
                      (make-virtual-node-host store node-server pki (merge-pathnames "virtual-nodes/" state-directory)
                                              :host-node (unless (getf options :disable-agent)
-                                                          (getf options :node-name))))
+                                                          (getf options :node-name))
+                                             ;; Where the node server listens, as the local agent dials it.
+                                             :endpoint (list (let ((listen (getf options :node-listen "127.0.0.1")))
+                                                               (if (string= listen "0.0.0.0") "127.0.0.1" listen))
+                                                             (node-grpc-server-port node-server))))
                (dolist (name (getf options :virtual-nodes))
                  (start-virtual-node virtual-nodes name)))
              (when (getf options :browser-listen)
