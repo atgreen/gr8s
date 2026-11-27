@@ -143,8 +143,9 @@
       <div class="step"><h3>You join</h3><p>The join page connects to the server over a WebSocket. It proves who it is with a
         key that your browser keeps. If you reload, you are the same node. If you close the tab, the node goes.</p></div>
       <div class="step"><h3>The server makes you a node</h3><p>Your tab appears in <code>kubectl get nodes</code> as
-        <code>browser-…</code>, <code>arm64</code>, with the capacity it offers. The server does the kubelet's half
-        of the work. Your tab only runs containers.</p></div>
+        <code>browser-…</code>, <code>arm64</code>, with the capacity it offers. For each tab, the gr8s server
+        runs a virtual kubelet: it watches for the node's Pods, reports their status, and drives the container runtime
+        in your tab over the WebSocket, telling it what to pull, start and stop. Your tab only runs containers.</p></div>
       <div class="step"><h3>Pods arrive</h3><p>A DaemonSet puts a web server Pod on every tab. The tab gets the image's
         layers from other tabs where it can, and checks each piece. Then the Pod boots in a
         <a href="https://github.com/pithings/unkernel">Linux VM compiled to WebAssembly</a>.</p></div>
