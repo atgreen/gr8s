@@ -15,6 +15,7 @@
 :- dynamic quota_rejection/3, quota_present/2.
 :- dynamic current_zero_disruptions/2, budget_selects/3, healthy_pod/2.
 :- dynamic control_plane/1.              % control_plane(Proof): the kubernetes Service has several members
+:- dynamic pod_on_node/3, node_absent/2. % pod_on_node(Pod, Node, Proof), node_absent(Node, Proof)
 :- dynamic member_says/3.                % member_says(Member, ResourceVersion, Proof), of Namespace default; the version a number when it is one
 
 %% related(?Code, ?Details, ?Proof)
@@ -50,6 +51,12 @@ related("rollout-quota-rejection", [Deployment, ReplicaSet, Quota], [Root, Sets,
     replica_creation_failed(ReplicaSet, Sets),
     quota_rejection(ReplicaSet, Quota, Event),
     quota_present(Quota, QuotaProof).
+%% A Pod bound to a Node that no longer exists: a browser node's tab closed, or a
+%% Node was deleted, and the Pod was never collected (podster-k988).
+related(Code, [Pod, Node], [Root, Proof]) :-
+    pod_on_node(Pod, Node, Root),
+    node_absent(Node, Proof),
+    ( string_concat("browser-", _, Node) -> Code = "pod-browser-node-gone" ; Code = "pod-node-gone" ).
 related("pdb-blocks-healthy-eviction", [Budget, Pod], [Root, Pods]) :-
     current_zero_disruptions(Budget, Root),
     budget_selects(Budget, Pod, Pods),
@@ -106,6 +113,12 @@ relation("hpa-missing-resource-request", "warning",
 relation("rollout-quota-rejection", "warning",
          "Deployment ~A has a replica deficit; active ReplicaSet ~A reports FailedCreate and a recent Event reports quota ~A exceeded.",
          "Inspect the named quota and current usage before increasing replicas or adjusting quota.").
+relation("pod-node-gone", "warning",
+         "Pod ~A is bound to node ~A, which no longer exists, so nothing runs it and nothing reports on it.",
+         "Delete the Pod; its controller makes a replacement that the scheduler places elsewhere. gr8s deletes such Pods itself once the Node has been gone 40 s, so one that stays means an older gr8s or a failed deletion.").
+relation("pod-browser-node-gone", "warning",
+         "Pod ~A is bound to browser node ~A, whose tab has closed, so nothing runs it and nothing reports on it.",
+         "Delete the Pod; its controller makes a replacement for another node, or another browser tab. gr8s deletes such Pods itself once the node has been gone 40 s, so one that stays means an older gr8s or a failed deletion.").
 relation("pdb-blocks-healthy-eviction", "advisory",
          "PDB ~A currently permits zero disruptions and selects healthy Pod ~A; voluntary eviction would be blocked by this budget.",
          "Restore redundancy or review the disruption policy before draining; do not bypass the budget blindly.").

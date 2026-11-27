@@ -228,6 +228,29 @@ Service. Every member must give it the same resourceVersion."
                                (causal-observation context "Namespace" nil "default" :present view
                                                    (format nil "Read through ~A" member))))))))))))
 
+(defun collect-pod-node-causes (context pod root)
+  "When POD, not finished, is bound to a Node that the API says does not exist, state
+pod_on_node and node_absent: nothing runs the Pod and no agent will report it. The
+absent Node is the finding's evidence, not something the doctor failed to see."
+  (let ((node (field pod "spec" "nodeName")))
+    ;; Only a Pod in trouble -- not ready, or stuck being deleted -- is worth a Node read.
+    (when (and (stringp node) (plusp (length node))
+               (not (member (field pod "status" "phase") '("Succeeded" "Failed") :test #'equal))
+               (or (field pod "metadata" "deletionTimestamp")
+                   (find-if (lambda (condition)
+                              (and (equal "Ready" (field condition "type"))
+                                   (not (equal "True" (field condition "status")))))
+                            (or (field pod "status" "conditions") #()))))
+      (multiple-value-bind (resource present proof) (causal-read context "Node" nil node)
+        (declare (ignore resource))
+        (when (and (not present)
+                   (equal "absent" (field (find proof (causal-context-evidence context) :test #'equal
+                                                :key (lambda (e) (field e "id")))
+                                          "result")))
+          (setf (causal-context-unknown context) (remove proof (causal-context-unknown context) :test #'equal))
+          (causal-fact context 'pod_on_node (field pod "metadata" "name") node root)
+          (causal-fact context 'node_absent node proof))))))
+
 (defun collect-claim-causes (context claim ns root)
   (let ((name (field claim "metadata" "name")) (class-name (field claim "spec" "storageClassName")))
     (unless (and (equal "Pending" (field claim "status" "phase"))
@@ -388,7 +411,7 @@ Service. Every member must give it the same resourceVersion."
                                       (causal-fact context 'quota_present quota-name quota-proof)))))))))))
 
 (defun augment-causal-report (report resource kind ns getter)
-  (when (and (member kind '("Service" "PersistentVolumeClaim" "HorizontalPodAutoscaler" "Deployment" "PodDisruptionBudget") :test #'equal)
+  (when (and (member kind '("Service" "PersistentVolumeClaim" "HorizontalPodAutoscaler" "Deployment" "PodDisruptionBudget" "Pod") :test #'equal)
              (plusp (length (gethash "evidence" report)))
              (equal "present" (field (aref (gethash "evidence" report) 0) "result"))
              (not (find "changed-during-collection" (gethash "evidence" report) :test #'equal
@@ -414,7 +437,8 @@ Service. Every member must give it the same resourceVersion."
           ((equal kind "PersistentVolumeClaim") (collect-claim-causes context resource namespace root))
           ((equal kind "HorizontalPodAutoscaler") (collect-hpa-causes context resource namespace root))
           ((equal kind "PodDisruptionBudget") (collect-budget-causes context resource namespace root))
-          ((equal kind "Deployment") (collect-rollout-causes context resource namespace root)))
+          ((equal kind "Deployment") (collect-rollout-causes context resource namespace root))
+          ((equal kind "Pod") (collect-pod-node-causes context resource root)))
     (let ((answers (prove (reverse (causal-context-facts context))
                           '((related ?code ?details ?proof)) '(?code ?details ?proof))))
       (multiple-value-bind (after state) (funcall getter kind namespace name)

@@ -287,3 +287,24 @@
       (assert (not (search "logging" (com.inuoe.jzon:stringify (gethash "findings" report))))))))
 
 (format t "HPA container utilization: missing/present requests, Pod budget, unrelated sidecar, absent target and absolute-value checks passed.~%")
+
+;; A Pod bound to a Node that no longer exists (podster-k988): the absent Node is the
+;; evidence, so the report is complete, not incomplete; a browser node's tab closed.
+(flet ((bound-pod (name node &optional (phase "Running"))
+         (cr "Pod" name (object "nodeName" node "containers" (vector (object "name" "web")))
+             (object "phase" phase "conditions" (vector (object "type" "Ready" "status" "False"))))))
+  (let ((report (causal-check (bound-pod "stranded" "worker-gone") nil)))
+    (assert (equal '("pod-node-gone") (codes report)))
+    (assert (equal "findings" (gethash "status" report)))
+    (assert (search "worker-gone, which no longer exists" (gethash "summary" (aref (gethash "findings" report) 0)))))
+  (assert (equal '("pod-browser-node-gone") (codes (causal-check (bound-pod "tab-web" "browser-1b650b") nil))))
+  ;; A Node that is there, a finished Pod, or a Node the doctor may not read: no finding.
+  (assert (null (codes (causal-check (bound-pod "placed" "worker-a") (list (cr "Node" "worker-a"))))))
+  (assert (null (codes (causal-check (bound-pod "done" "worker-gone" "Succeeded") nil))))
+  (let ((report (causal-check (bound-pod "hidden" "worker-x") nil '(("Node" "worker-x")))))
+    (assert (null (codes report)))
+    (assert (equal "incomplete" (gethash "status" report)))))
+;; And it is why the Pod is not ready.
+(assert (known '(refines "pod-node-gone" "pod-Ready-False") t))
+(assert (known '(refines "pod-browser-node-gone" "pod-ContainersReady-False") t))
+(format t "Pods on Nodes that are gone: absent, browser, present, finished and unreadable Nodes, and the readiness link passed.~%")

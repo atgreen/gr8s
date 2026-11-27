@@ -725,12 +725,18 @@ function problemBox(problem, held) {
   where.append('About ');
   problem.resources.forEach((target, i) => where.append(i ? ', ' : '', targetLink(target, problem.nodes[i] || problem.nodes[0])));
   box.append(where);
-  if (Array.isArray(problem.impact) && problem.impact.length) {
+  // Each other resource once, as `gr8s doctor` prints it: several findings on one Deployment are one
+  // thing held up, and the problem's own resources are what it is about. The JSON keeps every finding.
+  const held = [];
+  for (const entry of Array.isArray(problem.impact) ? problem.impact : []) {
+    if (!problem.resources.includes(entry.target) && !held.some((h) => h.target === entry.target)) held.push(entry);
+  }
+  if (held.length) {
     const list = el('ul');
-    for (const entry of problem.impact.slice(0, 8)) {
+    for (const entry of held.slice(0, 8)) {
       const li = el('li'); li.append(targetLink(entry.target, null), entry.certain ? '' : ' (possibly)'); list.append(li);
     }
-    if (problem.impact.length > 8) list.append(el('li', null, (problem.impact.length - 8) + ' more'));
+    if (held.length > 8) list.append(el('li', null, (held.length - 8) + ' more'));
     box.append(el('div', 'meta', 'Holds up'), list);
   }
   return box;
