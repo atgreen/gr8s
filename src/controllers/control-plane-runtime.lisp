@@ -156,9 +156,15 @@
       (publish-node-snapshot runtime (node-record-name node)))
     (control-plane-observation runtime pod)))
 
+(defun node-gone-p (store name)
+  "Whether NAME names no Node in STORE: a Pod bound to it runs nowhere, and no agent can
+be told to stop it (podster-k988)."
+  (null (with-store-lock (store) (get-node-unlocked store name))))
+
 (defmethod runtime-delete ((runtime control-plane-runtime) uid)
   (let ((pod (control-plane-pod-by-uid runtime uid)))
-    (when (and pod (pod-node-name pod))
+    (when (and pod (pod-node-name pod)
+               (not (node-gone-p (control-plane-runtime-store runtime) (pod-node-name pod))))
       ;; Snapshots are authoritative. Omitting the Pod tells the node agent to
       ;; stop it before the control-plane record is removed.
       (publish-node-snapshot runtime (pod-node-name pod) :excluded-uid uid)))
@@ -172,7 +178,8 @@
       ;; Even grace=0 must wait for physical cleanup when the API retains the
       ;; Pod. Keep its assignment until the finalizers have actually cleared.
       (let ((finalization (pod-finalization-state store pod)))
-        (if (or (not (pod-node-name pod)) (and finalization (gethash "runtimeDeleted" finalization)))
+        (if (or (not (pod-node-name pod)) (node-gone-p store (pod-node-name pod))
+                (and finalization (gethash "runtimeDeleted" finalization)))
             (return-from runtime-delete-pod t)
             (progn (publish-node-snapshot runtime (pod-node-name pod))
                    (return-from runtime-delete-pod nil)))))
@@ -180,6 +187,8 @@
       ;; A refused Pod never reached its agent, which therefore has nothing to confirm.
       ((with-store-lock (store) (pod-admission-rejected-p store pod)) t)
       ((or (not (pod-node-name pod))
+           ;; A node that has gone has nothing left running, and nobody to confirm it.
+           (node-gone-p store (pod-node-name pod))
            (zerop (gethash "deletionGracePeriodSeconds" (gethash "metadata" (pod-to-object pod)) 0))
            (and (equal (pod-resource-version pod) (pod-observed-resource-version store pod))
                 (equal "Deleted" (and status (gethash "reason" status)))))

@@ -102,3 +102,41 @@
                                                     :resource-version (gethash "resourceVersion" metadata)))
                 (kubernetes-error (condition)
                   (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition)))))))))))
+
+;;; Pods on Nodes that are gone (podster-k988)
+
+(defparameter +absent-node-quarantine-seconds+ 40
+  "How long a Node must stay absent before its Pods are collected: as Kubernetes' Pod
+garbage collector waits, so a Node removed and registered again at once keeps its Pods.")
+
+(defvar *absent-nodes-first-seen* (make-hash-table :test #'equal)
+  "When each absent Node a Pod is still bound to was first seen absent, by name.")
+
+(defun collect-pods-on-absent-nodes (reconciler &key (now (get-universal-time))
+                                                     (quarantine +absent-node-quarantine-seconds+))
+  "Delete Pods bound to a Node that no longer exists, as Kubernetes' Pod garbage collector
+does, once the Node has been absent for QUARANTINE seconds. Nothing runs them and no
+agent will report them, so they would otherwise stay bound for good, not ready but
+counted by their controllers. Their controllers create replacements the scheduler places.
+Returns the number of Pods deleted."
+  (let* ((store (reconciler-store reconciler))
+         (absent (loop for pod in (list-pods store)
+                       for node = (pod-node-name pod)
+                       when (and node (plusp (length node)) (node-gone-p store node))
+                         collect (cons node pod)))
+         (deleted 0))
+    ;; Forget Nodes that came back, or that no Pod waits on any more.
+    (loop for node being the hash-keys of *absent-nodes-first-seen*
+          unless (assoc node absent :test #'equal)
+            do (remhash node *absent-nodes-first-seen*))
+    (loop for (node . pod) in absent
+          for since = (or (gethash node *absent-nodes-first-seen*)
+                          (setf (gethash node *absent-nodes-first-seen*) now))
+          when (>= (- now since) quarantine)
+            do (handler-case
+                   (when (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod)
+                                                "pod-garbage-collector" :uid (pod-uid pod))
+                     (incf deleted))
+                 (kubernetes-error (condition)
+                   (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition)))))
+    deleted))

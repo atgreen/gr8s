@@ -7,6 +7,16 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
+### Fixed
+
+- Pods bound to a Node that no longer exists are deleted, as Kubernetes' Pod garbage
+  collector does, once the Node has been gone 40 s, so their controllers replace them
+  (podster-k988). A browser node whose tab closed left its Pods bound for good, not
+  ready, still counted by their Deployments and DaemonSets, and still listed as ready
+  endpoints. Deleting such a Pod also works now: it failed with "Node … was not found",
+  even with `--force --grace-period=0`, because the deletion tried to tell the absent
+  Node to stop the Pod.
+
 ## [v1.37.2-gr8s.9] — 2026-11-27
 
 ### Highlights
