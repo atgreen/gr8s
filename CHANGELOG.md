@@ -7,72 +7,42 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ## [Unreleased]
 
-### Added
+## [v1.37.2-gr8s.9] — 2026-11-27
 
-- Pods on browser nodes can use the visitor's GPU (podster-tr2r): a tab with a
-  hardware WebGPU adapter offers `gr8s.io/gpu: 1` and labels naming it, and a Pod that
-  asks for it gets Vulkan 1.2 on the tab's WebGPU device, with the driver given to its
-  containers.
-- Browser tabs rejoin on their own when their server restarts or is upgraded, and
-  always on the server's current page and runtime: the page is never cached and loads
-  the runtime at a URL naming its hash (podster-w22b).
-- Limits on browser joins: `serve --browser-max-nodes N` (default 64) and
-  `--browser-max-per-client N` (default 4, by the client address the Gateway forwards
-  in `X-Forwarded-For`). A browser past either is told why and doesn't join.
-- [docs/browser-nodes.md](docs/browser-nodes.md): how to offer browser nodes from a
-  cluster (podster-931v).
-- The browser node join page shows each Pod's container logs and its VM's boot console
-  in a drop-down under the Pod, read from the tab itself with no traffic to the server
-  (podster-y81l).
-- A cert-manager `acme` issuer (podster-23v9.4): an Issuer or ClusterIssuer with
-  `spec.acme` gets publicly trusted certificates from Let's Encrypt, or any RFC 8555
-  server, validated over HTTP-01 through `http01.gatewayHTTPRoute` solvers. The
-  controller keeps the account key in the `privateKeySecretRef` Secret (a
-  ClusterIssuer's in `kube-system`), writes an `acme.cert-manager.io/v1` Challenge
-  per pending authorization, and every node's Gateway listeners answer
-  `/.well-known/acme-challenge/<token>` for it before route matching. The issued
-  chain and RSA key land in the Certificate's `kubernetes.io/tls` Secret for an
-  HTTPS listener, and renew like other issuers' certificates. Failed orders back
-  off from 5 minutes, doubling to a day, and a server's `Retry-After` defers the
-  next step. A listener answers a Challenge only where an HTTPRoute from the
-  Certificate's namespace could attach for its host (hostname, `allowedRoutes`,
-  the solver's `parentRefs`), and the issuer refuses authorizations for names the
-  Certificate does not list, so a tenant cannot validate another's hostnames.
-  Steps run off the reconcile pass with bounded requests over verified TLS. DNS-01,
-  Ingress solvers and external account binding are rejected at admission.
-  A Certificate's `renewBefore` must now be shorter than its `duration`, and one
-  not shorter than the validity the issuer chose falls back to a third of it.
-  On a port, only the listener that wins a Challenge's host may answer it, and
-  only with the solver's `parentRefs`, which admission now requires. An ACME step
-  stops writing once its control plane stops leading. Durations parse as Go
-  writes them (`2160h0m0s`), and the `renewBefore` rule applies only when a
-  Certificate's spec changes.
+### Highlights
 
-- Browser nodes share image layers over the agents' BitTorrent protocol (podster-9mio):
-  each layer is a BEP 52 torrent, the very torrent agents build for it (a zstd layer,
-  served decompressed, gets one bound to the bytes served), described to tabs at
-  `/torrents/DIGEST` on the join listener. Tabs speak the standard peer wire, byte for
-  byte as cl-torrent does, over WebRTC data channels: they fetch pieces rarest first from
-  up to 8 tabs that hold a layer or are still downloading it, check each piece against
-  its Merkle root, share pieces while downloading, and drop a peer at its first bad
-  piece. The server seeds every piece over HTTP ranges, so a layer always arrives. The
-  whole-layer tab-to-tab transfer it replaces is gone.
-- Browser nodes connect across NATs (podster-zra1): `serve --browser-stun-listen
-  HOST:PORT` answers STUN binding requests on UDP, so each tab learns the public
-  address its NAT gives it and tabs on different networks connect directly, with no
-  third party seeing visitors' addresses. `--browser-ice-server URL` (repeatable) adds
-  other STUN or TURN servers. `--browser-peering all|same-network|none` says which
-  tabs connect directly, since direct peers learn each other's public address; the
-  default is `same-network`, and the join page says so when it is `all`. Tabs that
-  don't connect directly still reach each other through the server.
-- Checked content from browser Pods (podster-23v9.8): a Service annotated
-  `gr8s.io/verified-content-root: DIR` is served at `/verified/NAMESPACE/SERVICE/` on
-  the browser join listener. The server asks one of the Service's browser Pods over the
-  Pod network and passes the answer on only when it is, byte for byte, the file the
-  image (which the server pulled and checked) holds under DIR. Any other answer fails
-  the request and taints the node `gr8s.io/tampered:NoExecute`. An HTML page that passes
-  gets `<!--gr8s:node-->`, `pod`, `browser`, `image`, `digest`, `file`, `up` and
-  `served-at` filled in by the server. `examples/browser-demo` is such a page.
+This release brings five major features. Each has its own section below, with the
+fixes that went with it.
+
+- **Browser nodes: a web browser tab is a worker node.** `gr8s serve
+  --browser-listen` publishes a join page, and a tab that opens it becomes a node
+  whose Pods each run in their own Linux VM compiled to WebAssembly. Nothing is
+  installed on the visitor's machine. Browser Pods have real cluster networking
+  (DNS, Services, NetworkPolicy), reach each other over WebRTC across NATs, share
+  image layers between tabs over BitTorrent, can lend the visitor's GPU to a Pod
+  through WebGPU, and can serve web content the server checks against the image.
+  See [docs/browser-nodes.md](docs/browser-nodes.md); demo.gr8s.io runs it.
+- **gr8: commands and AI agents in a sandbox.** `gr8 COMMAND` runs a command in a
+  sandboxed Pod on your node, reaching only the hostnames a policy allows. Real
+  credentials stay in the cluster: the command holds stand-ins, which the node's
+  egress proxy swaps for the real values on the way out. ClusterNetworkPolicy
+  with `domainNames`, credential injection, OAuth logins for any tool, and desktop
+  sandboxes with display, audio and GPU. See [docs/gr8.md](docs/gr8.md).
+- **The dashboard's Network tab.** A live map of the cluster's traffic, drawn
+  from flow events: workloads, Services, Gateways, the LAN and the world, with
+  rates, drops and latency. It explains which NetworkPolicy allowed or dropped a
+  connection, shows `gr8s doctor`'s findings on the map, and links Gateway
+  traffic to its traces.
+- **Let's Encrypt certificates through the Gateway.** A cert-manager `acme`
+  Issuer or ClusterIssuer gets publicly trusted certificates over HTTP-01, which
+  every node's Gateway listeners answer, scoped so a tenant can't validate
+  another's hostnames.
+- **OpenTelemetry.** Gateway listeners record a span for each request, joining
+  the client's trace and passing it to the backend, and agents can send their
+  flow events as OTLP log records.
+
+### Browser nodes
+
 - Browser nodes, first steps (podster-57fv, docs/design-browser-nodes.md): `serve`
   can run node agents for nodes whose containers live elsewhere ("virtual nodes",
   `--virtual-node NAME` on the fake runtime), each enrolled, labelled and tainted
@@ -89,98 +59,71 @@ the Kubernetes API version with a gr8s release suffix (see
   `kubernetes.io/arch` is now the architecture its agent reports, so an arm64 node
   joined to an amd64 server is labelled arm64, and virtual nodes are no longer
   offered to the overlay as peers.
+- Limits on browser joins: `serve --browser-max-nodes N` (default 64) and
+  `--browser-max-per-client N` (default 4, by the client address the Gateway forwards
+  in `X-Forwarded-For`). A browser past either is told why and doesn't join.
+- Browser nodes connect across NATs (podster-zra1): `serve --browser-stun-listen
+  HOST:PORT` answers STUN binding requests on UDP, so each tab learns the public
+  address its NAT gives it and tabs on different networks connect directly, with no
+  third party seeing visitors' addresses. `--browser-ice-server URL` (repeatable) adds
+  other STUN or TURN servers. `--browser-peering all|same-network|none` says which
+  tabs connect directly, since direct peers learn each other's public address; the
+  default is `same-network`, and the join page says so when it is `all`. Tabs that
+  don't connect directly still reach each other through the server.
+- Browser nodes share image layers over the agents' BitTorrent protocol (podster-9mio):
+  each layer is a BEP 52 torrent, the very torrent agents build for it (a zstd layer,
+  served decompressed, gets one bound to the bytes served), described to tabs at
+  `/torrents/DIGEST` on the join listener. Tabs speak the standard peer wire, byte for
+  byte as cl-torrent does, over WebRTC data channels: they fetch pieces rarest first from
+  up to 8 tabs that hold a layer or are still downloading it, check each piece against
+  its Merkle root, share pieces while downloading, and drop a peer at its first bad
+  piece. The server seeds every piece over HTTP ranges, so a layer always arrives. The
+  whole-layer tab-to-tab transfer it replaces is gone.
+- Checked content from browser Pods (podster-23v9.8): a Service annotated
+  `gr8s.io/verified-content-root: DIR` is served at `/verified/NAMESPACE/SERVICE/` on
+  the browser join listener. The server asks one of the Service's browser Pods over the
+  Pod network and passes the answer on only when it is, byte for byte, the file the
+  image (which the server pulled and checked) holds under DIR. Any other answer fails
+  the request and taints the node `gr8s.io/tampered:NoExecute`. An HTML page that passes
+  gets `<!--gr8s:node-->`, `pod`, `browser`, `image`, `digest`, `file`, `up` and
+  `served-at` filled in by the server. `examples/browser-demo` is such a page.
+- The browser node join page shows each Pod's container logs and its VM's boot console
+  in a drop-down under the Pod, read from the tab itself with no traffic to the server
+  (podster-y81l).
+- Browser tabs rejoin on their own when their server restarts or is upgraded, and
+  always on the server's current page and runtime: the page is never cached and loads
+  the runtime at a URL naming its hash (podster-w22b).
+- Pods on browser nodes can use the visitor's GPU (podster-tr2r): a tab with a
+  hardware WebGPU adapter offers `gr8s.io/gpu: 1` and labels naming it, and a Pod that
+  asks for it gets Vulkan 1.2 on the tab's WebGPU device, with the driver given to its
+  containers.
+- [docs/browser-nodes.md](docs/browser-nodes.md): how to offer browser nodes from a
+  cluster (podster-931v).
 
-- gr8 policy credentials take `paths` (prefixes, or `=PATH` exact) and `methods`,
-  binding a credential to those requests on its hosts alone (podster-wv1w.29).
+#### Fixed
 
-- Per-credential stand-ins (podster-wv1w.27): each gr8 policy credential gets its own
-  stand-in, recorded on its Secret as `gr8s.io/stand-in`, and the node egress proxy
-  swaps the real value in only where a request carries it, in any header or inside
-  `Authorization: Basic`, keeping the client's own form. A Pod can hold several
-  credentials for one host, a request without the stand-in gets none, and git over
-  HTTPS works. `prefix` shapes a stand-in for clients that check (`gho_`). Secrets
-  without a stand-in keep the rule's header overwrite.
+- Pods on browser nodes reach Services by ClusterIP (podster-kw5u). Connections to
+  one timed out: nothing translated the address for a Pod in a tab, and the server
+  judged egress policy against the ClusterIP. The tab now translates, asking the
+  server for a Service port's backends when a Pod first uses it.
+- A browser tab no longer retries a direct link to a peer it can't reach on every
+  packet (podster-99q4): after a failure it waits 10 s, doubling up to 10 minutes,
+  and meanwhile sends that peer's traffic and layer requests through the server
+  without waiting on a link.
+- Browser tabs no longer drop when the leader checkpoints (podster-0hp0). A report that
+  couldn't be made while the store was blocked ended the tab's reporter for good, and
+  the Gateway, which cut an upgraded connection whose backend was quiet for 10 s (its
+  connect timeout, which SBCL also applies to reads), then closed the tab's session. A
+  tab now misses one report; upgraded connections may stay quiet for an hour at either
+  end; and a browser's statistics are waited for 5 s, not 120.
 
-- Logins for any tool (podster-wv1w.20): `gr8 --login NAME` moves a tool's OAuth
-  login into the cluster, described by its file, token key paths, expiry, inject
-  hosts and token endpoint; claude is built in and `~/.config/gr8/logins.yaml`
-  adds others. A sandboxed run of its commands sees the tool's file with stand-ins
-  at the token keys and may reach the login's hosts. `--logout NAME` and `--logins`;
-  policy files take `from: login:NAME`. This replaces `gr8 login claude`, whose
-  Secret and profiles it removes. gr8's own modes inside the Pod (hold, launch,
-  enter, confine) now follow `--internal`, so no command of those names is mistaken
-  for one.
+### gr8 and egress control
 
-- gr8 policy files (podster-wv1w.14): one `gr8.gr8s.io/v1alpha1` Policy says a
-  command's hosts, credentials (read from `env:` or `file:` sources on the host when
-  the run starts), home grants, environment, egress inspection, desktop and
-  resources. gr8 makes them resources scoped to the run's Pod, owned by it where
-  namespaced, and removes them when the run ends. `~/.config/gr8/policies/CMD.yaml`
-  is trusted; a working directory's `.gr8/CMD.yaml`, which the sandbox could edit, is
-  pinned by content, and shown and asked about again whenever it changes.
-  SandboxProfile gains `spec.run`, a profile for one run, which the node prefers.
-
-- A gr8 sandbox requests 1 CPU and 1Gi and is limited to half the node's CPU and
-  memory by default, `--cpu` and `--memory` setting both; it was BestEffort, with
-  no ceiling and the first to be killed.
-
-- A gr8 sandbox is a desktop one (podster-wv1w.15, .16, .17): it gets the caller's
-  Wayland display and audio (PipeWire, PulseAudio) at the same paths in its own
-  runtime directory, and the GPU through a device plugin built into the agent,
-  `gr8s.io/dri`, which shares the render nodes and NVIDIA's device nodes.
-  `--no-display`, `--no-audio` and `--no-gpu` withhold them. Never X11 or D-Bus.
-  NSS clients (Firefox, Chrome) trust the egress CA through p11-kit's anchors, so
-  `gr8 firefox` works with TLS termination.
-
-- The Network view draws more than 8 World sites in a view as one Internet node, with
-  one edge per workload and direction carrying their sum, and a scrollable list of
-  the sites on its card (most dropped first, then busiest) that opens each one's
-  connection. A browser in a gr8 sandbox reaches dozens of sites, which buried the
-  view.
-
-- Binary-scoped egress (podster-wv1w.13): SandboxProfile `spec.egress.binaries` lets a
-  host be reached only by listed programs (`hosts`, `paths` with `*` and `**`), or
-  their children. The node finds the program behind each proxied connection from the
-  Pod's `/proc` (the socket by the client's address, the process holding it, its
-  executable and parents), and every connection event names it (`l7.process`).
-
-- The node egress proxy handles an OAuth refresh for a sandbox (podster-kn03): a
-  SecurityProfile rule of the gr8s type `OAuthRefresh` swaps the real refresh token
-  into a refresh request, keeps the new tokens the response carries and hands the
-  client stand-ins. The node writes the tokens back to the Secret through a new
-  `CredentialRotation` node-protocol message, which the server accepts only for that
-  node's Pod and rule. `gr8 login claude` stores the refresh token and adds the rule,
-  the sandbox refreshes on the login's real expiry, and gr8 keeps the Secret and the
-  host's credentials file in step, the later expiry winning.
-
-- A stand-in credential is bound to the hosts its rules inject for (podster-wv1w.12):
-  a relayed request that would carry one anywhere else, or on a path no rule covers,
-  gets 403 with a body saying which header, for what request, and where the Pod's
-  credentials are bound; Audit enforcement reports it and forwards.
-
-- The node egress proxy terminates a gr8 sandbox's TLS for every allowed host and
-  reports each request it makes (podster-wv1w.11). SandboxProfile `spec.egress` sets
-  `tls: Terminate|Passthrough`, `passthroughHosts` for clients that pin certificates,
-  and `enforcement: Enforce|Audit` (Audit reports a broken rule, such as domain
-  fronting, and forwards). `spec.namespaceSelector` scopes a profile to namespaces;
-  the node chooses the profile from the Pod's command label and namespace, never from
-  anything the Pod sets.
-
-- `gr8 --allow NAME` lets one run reach a hostname (repeatable; `*.example.com` for
-  subdomains) through a ClusterNetworkPolicy that selects only that run's Pod and is
-  deleted with it (podster-xazj). It needs permission to create ClusterNetworkPolicies.
-
-- A Pod can wait for its node to enforce its network policy with the readiness gate
-  `gr8s.io/NetworkReady`, which the node reports. gr8 Pods use it, so a command no
-  longer starts before its allowlist is in place (podster-ae08).
-
-- A gr8 sandbox, any Pod labelled `gr8s.io/gr8-command`, is always on synthetic
-  DNS, and anything its policies don't allow is denied (podster-1mzb). Its DNS
-  answers only the names a ClusterNetworkPolicy accepts for it (none: `REFUSED`).
-  It reaches those names through the node egress proxy. Every other connection is
-  denied by a built-in last rule, `gr8-sandbox`: by address, over IPv6, over UDP,
-  and to the API server and its own node, which other Pods reach past policy.
-
+- gr8: `gr8.gr8s.io/v1alpha1` SandboxProfile says what a command gets in the
+  caller's home and environment; the sandbox trusts the egress CA when the cluster
+  has one; `gr8 login claude` moves Claude Code's subscription token into the
+  cluster, so the sandboxed claude sees only stand-in tokens. The RPM and DEB
+  packages install `/usr/bin/gr8` beside `gr8s`; `make gr8` builds it from source.
 - Egress control and credential injection for AI agents, declared as Kubernetes
   resources and enforced by the node (podster-wv1w, docs/design-agent-egress.md):
   - `policy.networking.k8s.io/v1alpha2` ClusterNetworkPolicy is served natively:
@@ -204,11 +147,112 @@ the Kubernetes API version with a gr8s release suffix (see
     connection by the name the Pod looked up, whatever protocol it speaks, and dials
     only the addresses resolved with the answer (podster-wv1w.8). The range is
     reserved: Pod pools and ServiceCIDRs may not overlap it.
-- gr8: `gr8.gr8s.io/v1alpha1` SandboxProfile says what a command gets in the
-  caller's home and environment; the sandbox trusts the egress CA when the cluster
-  has one; `gr8 login claude` moves Claude Code's subscription token into the
-  cluster, so the sandboxed claude sees only stand-in tokens. The RPM and DEB
-  packages install `/usr/bin/gr8` beside `gr8s`; `make gr8` builds it from source.
+- gr8 policy files (podster-wv1w.14): one `gr8.gr8s.io/v1alpha1` Policy says a
+  command's hosts, credentials (read from `env:` or `file:` sources on the host when
+  the run starts), home grants, environment, egress inspection, desktop and
+  resources. gr8 makes them resources scoped to the run's Pod, owned by it where
+  namespaced, and removes them when the run ends. `~/.config/gr8/policies/CMD.yaml`
+  is trusted; a working directory's `.gr8/CMD.yaml`, which the sandbox could edit, is
+  pinned by content, and shown and asked about again whenever it changes.
+  SandboxProfile gains `spec.run`, a profile for one run, which the node prefers.
+- A gr8 sandbox is a desktop one (podster-wv1w.15, .16, .17): it gets the caller's
+  Wayland display and audio (PipeWire, PulseAudio) at the same paths in its own
+  runtime directory, and the GPU through a device plugin built into the agent,
+  `gr8s.io/dri`, which shares the render nodes and NVIDIA's device nodes.
+  `--no-display`, `--no-audio` and `--no-gpu` withhold them. Never X11 or D-Bus.
+  NSS clients (Firefox, Chrome) trust the egress CA through p11-kit's anchors, so
+  `gr8 firefox` works with TLS termination.
+- A gr8 sandbox requests 1 CPU and 1Gi and is limited to half the node's CPU and
+  memory by default, `--cpu` and `--memory` setting both; it was BestEffort, with
+  no ceiling and the first to be killed.
+- Logins for any tool (podster-wv1w.20): `gr8 --login NAME` moves a tool's OAuth
+  login into the cluster, described by its file, token key paths, expiry, inject
+  hosts and token endpoint; claude is built in and `~/.config/gr8/logins.yaml`
+  adds others. A sandboxed run of its commands sees the tool's file with stand-ins
+  at the token keys and may reach the login's hosts. `--logout NAME` and `--logins`;
+  policy files take `from: login:NAME`. This replaces `gr8 login claude`, whose
+  Secret and profiles it removes. gr8's own modes inside the Pod (hold, launch,
+  enter, confine) now follow `--internal`, so no command of those names is mistaken
+  for one.
+- Per-credential stand-ins (podster-wv1w.27): each gr8 policy credential gets its own
+  stand-in, recorded on its Secret as `gr8s.io/stand-in`, and the node egress proxy
+  swaps the real value in only where a request carries it, in any header or inside
+  `Authorization: Basic`, keeping the client's own form. A Pod can hold several
+  credentials for one host, a request without the stand-in gets none, and git over
+  HTTPS works. `prefix` shapes a stand-in for clients that check (`gho_`). Secrets
+  without a stand-in keep the rule's header overwrite.
+- gr8 policy credentials take `paths` (prefixes, or `=PATH` exact) and `methods`,
+  binding a credential to those requests on its hosts alone (podster-wv1w.29).
+- A stand-in credential is bound to the hosts its rules inject for (podster-wv1w.12):
+  a relayed request that would carry one anywhere else, or on a path no rule covers,
+  gets 403 with a body saying which header, for what request, and where the Pod's
+  credentials are bound; Audit enforcement reports it and forwards.
+- The node egress proxy terminates a gr8 sandbox's TLS for every allowed host and
+  reports each request it makes (podster-wv1w.11). SandboxProfile `spec.egress` sets
+  `tls: Terminate|Passthrough`, `passthroughHosts` for clients that pin certificates,
+  and `enforcement: Enforce|Audit` (Audit reports a broken rule, such as domain
+  fronting, and forwards). `spec.namespaceSelector` scopes a profile to namespaces;
+  the node chooses the profile from the Pod's command label and namespace, never from
+  anything the Pod sets.
+- The node egress proxy handles an OAuth refresh for a sandbox (podster-kn03): a
+  SecurityProfile rule of the gr8s type `OAuthRefresh` swaps the real refresh token
+  into a refresh request, keeps the new tokens the response carries and hands the
+  client stand-ins. The node writes the tokens back to the Secret through a new
+  `CredentialRotation` node-protocol message, which the server accepts only for that
+  node's Pod and rule. `gr8 login claude` stores the refresh token and adds the rule,
+  the sandbox refreshes on the login's real expiry, and gr8 keeps the Secret and the
+  host's credentials file in step, the later expiry winning.
+- Binary-scoped egress (podster-wv1w.13): SandboxProfile `spec.egress.binaries` lets a
+  host be reached only by listed programs (`hosts`, `paths` with `*` and `**`), or
+  their children. The node finds the program behind each proxied connection from the
+  Pod's `/proc` (the socket by the client's address, the process holding it, its
+  executable and parents), and every connection event names it (`l7.process`).
+- `gr8 --allow NAME` lets one run reach a hostname (repeatable; `*.example.com` for
+  subdomains) through a ClusterNetworkPolicy that selects only that run's Pod and is
+  deleted with it (podster-xazj). It needs permission to create ClusterNetworkPolicies.
+- A gr8 sandbox, any Pod labelled `gr8s.io/gr8-command`, is always on synthetic
+  DNS, and anything its policies don't allow is denied (podster-1mzb). Its DNS
+  answers only the names a ClusterNetworkPolicy accepts for it (none: `REFUSED`).
+  It reaches those names through the node egress proxy. Every other connection is
+  denied by a built-in last rule, `gr8-sandbox`: by address, over IPv6, over UDP,
+  and to the API server and its own node, which other Pods reach past policy.
+
+#### Fixed
+
+- Egress capture works on a real node (podster-uevw). It validated the service
+  load balancer's pinned maps against the CNI policy maps' layouts, so every write
+  failed ("incompatible schema"), and native agents never recorded a Pod's network
+  namespace cookie, by which capture names it. The proxy's decision read three of
+  the agent's four egress-view parts, so every captured connection signalled and
+  was reset. The proxy now logs its refusals and its connection errors, which it
+  used to swallow.
+  Hostname allowlists, credential injection and synthetic DNS did nothing outside
+  the unit tests.
+- The node egress proxy's verdicts reach the flow stream, the Network view, OTLP flow
+  logs and `observe_flows` (podster-5hv.11): a second `:report` argument had silently
+  replaced the one that sent them. The egress DNS gate reports each name it answers
+  or refuses for a captured Pod, and the Network view draws a refused lookup in red to
+  the site it names.
+- The egress DNS gate reports a Pod's lookup of a name once per decision: a
+  resolver's A and AAAA queries and retries made one refused lookup four events.
+- Egress NetworkPolicy now governs node DNS, the API server and the Pod's own
+  node (podster-5hv.10, closing security deviation F5). The egress guard used
+  to deliver those to the host before checking policy, so a Pod under
+  default-deny egress could still resolve names, reach the API server and the
+  node's services, and its connections to them never appeared in the flows or
+  on the Network map. **Behaviour change:** a Pod isolated for egress now needs
+  a rule for each. The usual rules work: a peer selecting `k8s-app: kube-dns`
+  Pods in `kube-system` selects the node DNS gateway, and a rule admitting the
+  API server's endpoints (the members' addresses on 6443) admits its Service
+  address too.
+- A host running avahi-daemon (or any mDNS responder) no longer shows its Pods
+  dropping spoofed packets on mDNS's schedule, doubling from a Pod's start up to
+  hourly (podster-4yh). The host's mDNS query out each Pod veth came back to it
+  as a loopback copy received on that veth, which the egress guard took for the
+  Pod's traffic from the wrong address. The guard now passes the host's own
+  loopback copies; a Pod can't make one.
+
+### Dashboard and observability
 
 - `gr8s dashboard` has a Network tab: a live map of the cluster's traffic,
   drawn from its flow events (podster-5hv). A node is a workload (a Pod
@@ -223,7 +267,6 @@ the Kubernetes API version with a gr8s release suffix (see
   traffic out left to right; a flow table follows the same filters. Its
   scripts, icons and font (Cytoscape.js, Simple Icons, Lucide, Inter) are
   embedded, pinned by version and checksum.
-
 - The Network tab explains NetworkPolicy (podster-5hv.3): selecting an edge
   shows, for each connection behind it, which rule of which policy allows it
   each way, or which policies refused it and the smallest rule that would
@@ -231,190 +274,57 @@ the Kubernetes API version with a gr8s release suffix (see
   shield. The view (namespace, window, verdict, selection, flow table) is kept
   in the URL so it can be linked. A policy's name, and a selected workload,
   open that resource in the Headlamp tab.
-
 - The Network tab shows `gr8s doctor` on the map (podster-5hv.4): it surveys
   the cluster every minute and marks the workloads a problem is about and the
   ones it holds up, with each problem's evidence and next step in their panels
   and every problem under Health.
-- Flow events name a peer outside the cluster by the DNS name a Pod looked up
-  to reach it (`peerName`), as the node's DNS server saw it answered
-  (podster-5hv.8), and the Network tab draws each such site as a node of its
-  own: `grafana → secure.gravatar.com` instead of `grafana → world`.
-
-- Gateway tracing with OpenTelemetry (podster-krg.1): an agent configured with
-  OTel's standard environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT` and the
-  rest) records a SERVER span for each request its Gateway listeners answer,
-  joining the client's W3C trace or starting one, hands the backend its span as
-  the `traceparent`, and exports spans over OTLP/HTTP. Off unless configured.
-
 - The Network tab links a Gateway edge to its traces (podster-krg.3): the edge
   lists its slowest recent requests, and a `DashboardTab` that shows traces
   (`spec.traces`, a path with `{traceId}` in it, such as Grafana Explore's for
   Tempo) opens each one. The dashboard page now also escapes every tab field it
   draws, a cluster's `DashboardTab` title among them.
-
+- The Network view draws more than 8 World sites in a view as one Internet node, with
+  one edge per workload and direction carrying their sum, and a scrollable list of
+  the sites on its card (most dropped first, then busiest) that opens each one's
+  connection. A browser in a gr8 sandbox reaches dozens of sites, which buried the
+  view.
+- Flow events name a peer outside the cluster by the DNS name a Pod looked up
+  to reach it (`peerName`), as the node's DNS server saw it answered
+  (podster-5hv.8), and the Network tab draws each such site as a node of its
+  own: `grafana → secure.gravatar.com` instead of `grafana → world`.
+- Gateway tracing with OpenTelemetry (podster-krg.1): an agent configured with
+  OTel's standard environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT` and the
+  rest) records a SERVER span for each request its Gateway listeners answer,
+  joining the client's W3C trace or starting one, hands the backend its span as
+  the `traceparent`, and exports spans over OTLP/HTTP. Off unless configured.
 - Flow events as OpenTelemetry log records (podster-krg.2): with
   `OTEL_LOGS_EXPORTER=otlp`, each agent sends its flow events -- connections,
   drops and why, Gateway requests with their trace ids -- over OTLP/HTTP to the
   logs endpoint, one record per event with OTel's network attributes.
-
 - `gr8s dashboard` on a port a dashboard already serves says so -- "gr8s
   dashboard is already running at URL" -- and opens that one, instead of
   failing with `USOCKET:ADDRESS-IN-USE-ERROR`; a port another program holds is
   named as such, with `--port` to choose another. A running dashboard records
   its URL in a private file under `$XDG_RUNTIME_DIR/gr8s/`, removed when it exits.
 
-### Removed
+#### Fixed
 
-- `gr8s dashboard`'s Hubble tab, and the Hubble UI bundle it embedded: the
-  Network tab replaces it. The Hubble API stays: `gr8s doctor observe --serve`
-  still serves Hubble's Observer API for the `hubble` CLI.
-
-### Fixed
-
-- A control-plane member no longer exits when a checkpoint briefly blocks its store
-  (podster-0hp0). The flow observer and the resource-metrics collector let the
-  momentary "Application restore is blocking store access" error escape their
-  threads, which ends the server: a lab follower exited five times in three days.
-  Each now keeps its previous result and tries again.
-- Browser tabs no longer drop when the leader checkpoints (podster-0hp0). A report that
-  couldn't be made while the store was blocked ended the tab's reporter for good, and
-  the Gateway, which cut an upgraded connection whose backend was quiet for 10 s (its
-  connect timeout, which SBCL also applies to reads), then closed the tab's session. A
-  tab now misses one report; upgraded connections may stay quiet for an hour at either
-  end; and a browser's statistics are waited for 5 s, not 120.
-- Pods on browser nodes reach Services by ClusterIP (podster-kw5u). Connections to
-  one timed out: nothing translated the address for a Pod in a tab, and the server
-  judged egress policy against the ClusterIP. The tab now translates, asking the
-  server for a Service port's backends when a Pod first uses it.
-- A browser tab no longer retries a direct link to a peer it can't reach on every
-  packet (podster-99q4): after a failure it waits 10 s, doubling up to 10 minutes,
-  and meanwhile sends that peer's traffic and layer requests through the server
-  without waiting on a link.
 - A followed flow stream (the dashboard's Network tab, `gr8s doctor observe -f`) no
   longer loses a node for good when that node's stream ends, as when its agent
   restarts in a rolling upgrade: the node is asked again every 2 seconds, resuming
   after the last event delivered (podster-v7sj).
-- The egress DNS gate reports a Pod's lookup of a name once per decision: a
-  resolver's A and AAAA queries and retries made one refused lookup four events.
-
-- Every Burstable container got `oom_score_adj` 999, as if it requested no memory:
-  the node's memory capacity was read as NIL (`/proc/meminfo`'s value was parsed
-  twice), so the kubelet's scaling by memory request never applied.
-
-- A proxied connection whose client closed first could leave the Gateway's L4 proxy or
-  the node egress proxy waiting on the upstream forever: closing a socket another
-  thread is receiving on neither wakes it nor tells the peer. Both sockets are now
-  shut down first.
-
-- The node egress proxy's verdicts reach the flow stream, the Network view, OTLP flow
-  logs and `observe_flows` (podster-5hv.11): a second `:report` argument had silently
-  replaced the one that sent them. The egress DNS gate reports each name it answers
-  or refuses for a captured Pod, and the Network view draws a refused lookup in red to
-  the site it names.
-
-- A new Pod is in a ClusterNetworkPolicy's subject from the snapshot that assigns it,
-  not one after its address reaches the control plane, so its first connections are
-  not decided without the policy (podster-ae08).
-
-- A node no longer resolves a new Pod's policy with the labels of a deleted Pod whose
-  address it reused (podster-ae08).
-
-- Egress capture works on a real node (podster-uevw). It validated the service
-  load balancer's pinned maps against the CNI policy maps' layouts, so every write
-  failed ("incompatible schema"), and native agents never recorded a Pod's network
-  namespace cookie, by which capture names it. The proxy's decision read three of
-  the agent's four egress-view parts, so every captured connection signalled and
-  was reset. The proxy now logs its refusals and its connection errors, which it
-  used to swallow.
-  Hostname allowlists, credential injection and synthetic DNS did nothing outside
-  the unit tests.
-
-- A control-plane member no longer goes down when the member it relays a node
-  operation to is restarting (podster-2aum). Connecting to that peer, a refusal or
-  a TLS handshake that timed out, escaped the relay's error handling and ended the
-  whole process, so a rolling upgrade could take out the leader while the other
-  member restarted. The route now fails over or reports the peer unreachable. An
-  error in a routing thread fails its operation, not the server. A process that
-  does end on an unhandled error now exits within 10 seconds, not after SBCL's
-  60-second wait for its threads, so systemd restarts it promptly.
-
-- The `kubernetes` Service carries the labels kube-apiserver gives it,
-  `component: apiserver` and `provider: kubernetes` (podster-c6e), and a cluster
-  whose Service lacks them gains them. Monitoring finds the API server by them:
-  kube-prometheus-stack's apiserver ServiceMonitor found nothing, which led to
-  scraping every node on 6443, agents that don't serve the API included.
-
-- A host running avahi-daemon (or any mDNS responder) no longer shows its Pods
-  dropping spoofed packets on mDNS's schedule, doubling from a Pod's start up to
-  hourly (podster-4yh). The host's mDNS query out each Pod veth came back to it
-  as a loopback copy received on that veth, which the egress guard took for the
-  Pod's traffic from the wrong address. The guard now passes the host's own
-  loopback copies; a Pod can't make one.
-
-- Egress NetworkPolicy now governs node DNS, the API server and the Pod's own
-  node (podster-5hv.10, closing security deviation F5). The egress guard used
-  to deliver those to the host before checking policy, so a Pod under
-  default-deny egress could still resolve names, reach the API server and the
-  node's services, and its connections to them never appeared in the flows or
-  on the Network map. **Behaviour change:** a Pod isolated for egress now needs
-  a rule for each. The usual rules work: a peer selecting `k8s-app: kube-dns`
-  Pods in `kube-system` selects the node DNS gateway, and a rule admitting the
-  API server's endpoints (the members' addresses on 6443) admits its Service
-  address too.
-
-- `make native` in a fresh checkout embeds the Network tab's graph assets. The
-  binary's build didn't depend on them, so it built without them and the tab
-  had no graph; release builds, which fetch every asset first, were unaffected.
-
 - The Network tab's side panel no longer redraws itself every two seconds. It
   flashed and lost its scroll position on each poll; it now changes only when
   what it shows has, keeps where you had scrolled, and wraps long names instead
   of scrolling sideways.
-
-- NetworkPolicy no longer drops IPv6 neighbor discovery and MLD (podster-6cy).
-  An isolated Pod's ICMPv6 (and MLD behind a hop-by-hop header) to or from a
-  link-scope peer -- fe80::/10, ff02::/16 or the unspecified address -- passes
-  as interface housekeeping, as Cilium always admits NDP; without it a
-  dual-stack Pod's IPv6 could not resolve its neighbors. Other link-local
-  traffic, such as mDNS, is still the policy's to allow.
-
-- `kubectl exec` of a command that can't start says why, as Kubernetes does
-  (podster-dcz): `executable file not found in $PATH`, not a bare "command
-  terminated with exit code 1". The agent dropped the runtime's reason when a
-  status had no exit code. This is what distroless images (no shell, no
-  coreutils) hit: exec works in them, but only for programs they contain.
-
-- `gr8s doctor` no longer reports a finished Pod as not ready (podster-191). A
-  Job's Pod that completed is not ready by design, but the readiness checks
-  flagged it, so a cluster with CronJobs always had a problem to read past. The
-  readiness checks now skip Succeeded and Failed Pods; a failed Pod keeps the
-  findings about its exit.
-
-- Pods can reach the LAN and the internet (podster-swq). gr8s masqueraded Pod
-  traffic only to other nodes and the API, so a Pod's packets left with its
-  private address and replies never came back. Each agent now masquerades its
-  Pods' traffic leaving the cluster's Pod network, as other CNIs do;
-  `--pod-masquerade off` keeps Pod addresses on networks that route them.
-
+- `make native` in a fresh checkout embeds the Network tab's graph assets. The
+  binary's build didn't depend on them, so it built without them and the tab
+  had no graph; release builds, which fetch every asset first, were unaffected.
 - The dashboard's Hubble tab draws a workload's replicas as one card. Each Pod
   had its own identity, so a Deployment of four showed as four identical cards;
   identities now follow a Pod's namespace and labels, leaving out the labels that
   tell replicas apart (`pod-template-hash` and the like), as Cilium's do
   (podster-u0e).
-- A NetworkPolicy no longer cuts an idle connection after two hours. The policy
-  guards admitted a TCP connection's replies for 2 hours after its last packet,
-  exactly Linux's default `tcp_keepalive_time`, so an idle pooled connection's
-  first keepalive arrived just too late, was dropped, and the connection died
-  (seen with Postgres). Replies now stay admitted for 5 days, as conntrack keeps
-  an established connection; the flow maps are LRU, so this costs no memory
-  (podster-af3).
-- A new Pod's first connections to Pods behind an ingress policy on other nodes
-  are refused for much less time: about half a second, under TCP's first
-  retransmission, rather than up to 7-11 seconds under load. The agent reports a
-  Pod's new address at once instead of at its next 7-second status report, and
-  the control plane sends it to the other nodes at once instead of on its next
-  one-second pass (podster-auf).
 - `gr8s dashboard` no longer burns a CPU core after a watch ends. When the
   cluster ended a watch (a member restarting, say), the relay closed the
   browser's socket while its reader thread was still waiting on it, and that
@@ -423,6 +333,11 @@ the Kubernetes API version with a gr8s release suffix (see
   the REPL tab's tunnel) had the same race. A relay now only shuts a socket
   down to wake a reader, and closes it once the reader has finished
   (podster-gek).
+- `gr8s doctor` no longer reports a finished Pod as not ready (podster-191). A
+  Job's Pod that completed is not ready by design, but the readiness checks
+  flagged it, so a cluster with CronJobs always had a problem to read past. The
+  readiness checks now skip Succeeded and Failed Pods; a failed Pod keeps the
+  findings about its exit.
 - `gr8s doctor diagnose` and `impact`, and the MCP doctor tools, read the cluster
   with gr8s's own API client instead of running `kubectl`, so they work on a host
   without it, such as a control-plane member, where they defaulted to the
@@ -430,19 +345,75 @@ the Kubernetes API version with a gr8s release suffix (see
   A failed read now says why (the HTTP status and the server's message, or that
   it didn't answer), and the standalone `scripts/gr8s-doctor`, which still uses
   `kubectl`, says when it can't run it (podster-71m).
-- `kubectl apply` of a Service whose ports changed works. A strategic merge patch
-  to a Service was applied as a plain JSON merge patch, so the directives kubectl
-  sends (`$setElementOrder/ports`, `{"$patch": "delete"}`) were rejected as
-  unknown fields (422), and a patch naming one port replaced the whole list.
-  Services now merge as upstream does, ports keyed by their port number
-  (podster-0i0).
 - `gr8s doctor` refuses a word that is neither a command nor a directory, and
   suggests the command meant: `gr8s doctor diagnosis` checked an empty
   `./diagnosis/` state directory, found the node's live routes stale, and
   advised a `--fix` that would have torn them down (podster-m6w).
-- `gr8s status` compares each control-plane member's own `/version` too, so a
-  member without a Node (`serve --disable-agent`) on another release shows as
-  skew (podster-gta).
+
+### Gateway, certificates and networking
+
+- A cert-manager `acme` issuer (podster-23v9.4): an Issuer or ClusterIssuer with
+  `spec.acme` gets publicly trusted certificates from Let's Encrypt, or any RFC 8555
+  server, validated over HTTP-01 through `http01.gatewayHTTPRoute` solvers. The
+  controller keeps the account key in the `privateKeySecretRef` Secret (a
+  ClusterIssuer's in `kube-system`), writes an `acme.cert-manager.io/v1` Challenge
+  per pending authorization, and every node's Gateway listeners answer
+  `/.well-known/acme-challenge/<token>` for it before route matching. The issued
+  chain and RSA key land in the Certificate's `kubernetes.io/tls` Secret for an
+  HTTPS listener, and renew like other issuers' certificates. Failed orders back
+  off from 5 minutes, doubling to a day, and a server's `Retry-After` defers the
+  next step. A listener answers a Challenge only where an HTTPRoute from the
+  Certificate's namespace could attach for its host (hostname, `allowedRoutes`,
+  the solver's `parentRefs`), and the issuer refuses authorizations for names the
+  Certificate does not list, so a tenant cannot validate another's hostnames.
+  Steps run off the reconcile pass with bounded requests over verified TLS. DNS-01,
+  Ingress solvers and external account binding are rejected at admission.
+  A Certificate's `renewBefore` must now be shorter than its `duration`, and one
+  not shorter than the validity the issuer chose falls back to a third of it.
+  On a port, only the listener that wins a Challenge's host may answer it, and
+  only with the solver's `parentRefs`, which admission now requires. An ACME step
+  stops writing once its control plane stops leading. Durations parse as Go
+  writes them (`2160h0m0s`), and the `renewBefore` rule applies only when a
+  Certificate's spec changes.
+- A Pod can wait for its node to enforce its network policy with the readiness gate
+  `gr8s.io/NetworkReady`, which the node reports. gr8 Pods use it, so a command no
+  longer starts before its allowlist is in place (podster-ae08).
+
+#### Fixed
+
+- Pods can reach the LAN and the internet (podster-swq). gr8s masqueraded Pod
+  traffic only to other nodes and the API, so a Pod's packets left with its
+  private address and replies never came back. Each agent now masquerades its
+  Pods' traffic leaving the cluster's Pod network, as other CNIs do;
+  `--pod-masquerade off` keeps Pod addresses on networks that route them.
+- A NetworkPolicy no longer cuts an idle connection after two hours. The policy
+  guards admitted a TCP connection's replies for 2 hours after its last packet,
+  exactly Linux's default `tcp_keepalive_time`, so an idle pooled connection's
+  first keepalive arrived just too late, was dropped, and the connection died
+  (seen with Postgres). Replies now stay admitted for 5 days, as conntrack keeps
+  an established connection; the flow maps are LRU, so this costs no memory
+  (podster-af3).
+- NetworkPolicy no longer drops IPv6 neighbor discovery and MLD (podster-6cy).
+  An isolated Pod's ICMPv6 (and MLD behind a hop-by-hop header) to or from a
+  link-scope peer -- fe80::/10, ff02::/16 or the unspecified address -- passes
+  as interface housekeeping, as Cilium always admits NDP; without it a
+  dual-stack Pod's IPv6 could not resolve its neighbors. Other link-local
+  traffic, such as mDNS, is still the policy's to allow.
+- A new Pod is in a ClusterNetworkPolicy's subject from the snapshot that assigns it,
+  not one after its address reaches the control plane, so its first connections are
+  not decided without the policy (podster-ae08).
+- A node no longer resolves a new Pod's policy with the labels of a deleted Pod whose
+  address it reused (podster-ae08).
+- A new Pod's first connections to Pods behind an ingress policy on other nodes
+  are refused for much less time: about half a second, under TCP's first
+  retransmission, rather than up to 7-11 seconds under load. The agent reports a
+  Pod's new address at once instead of at its next 7-second status report, and
+  the control plane sends it to the other nodes at once instead of on its next
+  one-second pass (podster-auf).
+- A proxied connection whose client closed first could leave the Gateway's L4 proxy or
+  the node egress proxy waiting on the upstream forever: closing a socket another
+  thread is receiving on neither wakes it nor tells the peer. Both sockets are now
+  shut down first.
 - A Gateway passes on each of a backend's `Set-Cookie` headers on its own line,
   as the Pod proxy already did. It joined them into one with commas, so a browser
   kept only the first cookie: an OIDC login that sets a verifier and a state
@@ -456,12 +427,58 @@ the Kubernetes API version with a gr8s release suffix (see
   "does not serve /stats/summary" for it, and Prometheus could not scrape it. An
   agent whose kubelet endpoint is off for want of certificates now says so
   (podster-b55).
-- `/stats/summary` reports the node's filesystem (`node.fs`): the one under
-  `/var/lib/kubelet`, which DiskPressure watches. Headlamp shows it as the node's
-  ephemeral storage, and left that empty on every node (podster-b55).
+
+### Control plane, nodes and Kubernetes compatibility
+
+#### Fixed
+
+- A control-plane member no longer exits when a checkpoint briefly blocks its store
+  (podster-0hp0). The flow observer and the resource-metrics collector let the
+  momentary "Application restore is blocking store access" error escape their
+  threads, which ends the server: a lab follower exited five times in three days.
+  Each now keeps its previous result and tries again.
+- A control-plane member no longer goes down when the member it relays a node
+  operation to is restarting (podster-2aum). Connecting to that peer, a refusal or
+  a TLS handshake that timed out, escaped the relay's error handling and ended the
+  whole process, so a rolling upgrade could take out the leader while the other
+  member restarted. The route now fails over or reports the peer unreachable. An
+  error in a routing thread fails its operation, not the server. A process that
+  does end on an unhandled error now exits within 10 seconds, not after SBCL's
+  60-second wait for its threads, so systemd restarts it promptly.
+- `gr8s status` compares each control-plane member's own `/version` too, so a
+  member without a Node (`serve --disable-agent`) on another release shows as
+  skew (podster-gta).
 - A Node's `Ready` condition carries its `lastTransitionTime`: when the node's
   ready lease began, or for a node that isn't ready, when it was last heard from.
   Headlamp works out a node's uptime from it, and showed "NaNy" (podster-zac).
+- `/stats/summary` reports the node's filesystem (`node.fs`): the one under
+  `/var/lib/kubelet`, which DiskPressure watches. Headlamp shows it as the node's
+  ephemeral storage, and left that empty on every node (podster-b55).
+- Every Burstable container got `oom_score_adj` 999, as if it requested no memory:
+  the node's memory capacity was read as NIL (`/proc/meminfo`'s value was parsed
+  twice), so the kubelet's scaling by memory request never applied.
+- `kubectl exec` of a command that can't start says why, as Kubernetes does
+  (podster-dcz): `executable file not found in $PATH`, not a bare "command
+  terminated with exit code 1". The agent dropped the runtime's reason when a
+  status had no exit code. This is what distroless images (no shell, no
+  coreutils) hit: exec works in them, but only for programs they contain.
+- `kubectl apply` of a Service whose ports changed works. A strategic merge patch
+  to a Service was applied as a plain JSON merge patch, so the directives kubectl
+  sends (`$setElementOrder/ports`, `{"$patch": "delete"}`) were rejected as
+  unknown fields (422), and a patch naming one port replaced the whole list.
+  Services now merge as upstream does, ports keyed by their port number
+  (podster-0i0).
+- The `kubernetes` Service carries the labels kube-apiserver gives it,
+  `component: apiserver` and `provider: kubernetes` (podster-c6e), and a cluster
+  whose Service lacks them gains them. Monitoring finds the API server by them:
+  kube-prometheus-stack's apiserver ServiceMonitor found nothing, which led to
+  scraping every node on 6443, agents that don't serve the API included.
+
+### Removed
+
+- `gr8s dashboard`'s Hubble tab, and the Hubble UI bundle it embedded: the
+  Network tab replaces it. The Hubble API stays: `gr8s doctor observe --serve`
+  still serves Hubble's Observer API for the `hubble` CLI.
 
 ## [v1.37.2-gr8s.8] — 2026-11-24
 
@@ -1219,7 +1236,8 @@ OpenSSL. Release artifacts cover Linux amd64 and arm64: binaries with
 checksums, tarballs carrying the installer and lifecycle scripts, and
 CycloneDX and SPDX SBOMs for the Lisp dependencies.
 
-[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.8...HEAD
+[Unreleased]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.9...HEAD
+[v1.37.2-gr8s.9]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.8...v1.37.2-gr8s.9
 [v1.37.2-gr8s.8]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.7...v1.37.2-gr8s.8
 [v1.37.2-gr8s.7]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.6...v1.37.2-gr8s.7
 [v1.37.2-gr8s.6]: https://github.com/atgreen/gr8s/compare/v1.37.2-gr8s.5...v1.37.2-gr8s.6

@@ -92,7 +92,7 @@ API. Start with a disposable Linux VM.
 [latest release](https://github.com/atgreen/gr8s/releases) (`amd64` or `arm64`):
 
 ```sh
-VERSION=v1.37.2-gr8s.8 ARCH=amd64
+VERSION=v1.37.2-gr8s.9 ARCH=amd64
 curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH
 curl -fLO https://github.com/atgreen/gr8s/releases/download/$VERSION/gr8s-linux-$ARCH.sha256
 sha256sum -c gr8s-linux-$ARCH.sha256
