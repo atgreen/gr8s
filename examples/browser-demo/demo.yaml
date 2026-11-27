@@ -166,7 +166,7 @@ spec:
       automountServiceAccountToken: false
       containers:
       - name: web
-        image: ghcr.io/atgreen/gr8s-browser-demo:2
+        image: ghcr.io/atgreen/gr8s-browser-demo:3
         ports: [{containerPort: 8080}]
 ---
 # What those tabs serve is checked against the image's nginx root before anyone sees it.

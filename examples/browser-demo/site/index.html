@@ -84,6 +84,7 @@
   <header>
     <a class="brand" href="https://github.com/atgreen/gr8s"><span class="logo">g8</span>gr8s</a>
     <nav>
+      <a href="#gr8s">What is gr8s?</a>
       <a href="#how">How it works</a>
       <a href="#p2p">Peer to peer</a>
       <a href="#checked">Checked content</a>
@@ -92,11 +93,12 @@
   </header>
 
   <div class="hero">
-    <div class="eyebrow">The gr8s browser nodes demo</div>
+    <div class="eyebrow">gr8s browser nodes demo</div>
     <h1>A cluster whose nodes are <span>browser tabs</span></h1>
     <p class="lede">Open the join page and your tab becomes a worker node of a real, Kubernetes-compatible
-      cluster. The scheduler sends it Pods; each one runs in its own Linux VM inside your browser. Nothing
-      is installed on your machine, and closing the tab leaves the cluster.</p>
+      cluster. The scheduler sends it Pods; each one runs in its own Linux VM inside your browser, on the
+      cluster's Pod network, talking peer to peer with Pods in other visitors' tabs. Nothing is installed on
+      your machine, and closing the tab leaves the cluster.</p>
     <div class="actions">
       <a class="button primary" href="https://join.demo.gr8s.io/">Join with this tab →</a>
       <a class="button" href="https://tabs.demo.gr8s.io/">See the page tabs serve</a>
@@ -104,6 +106,29 @@
     </div>
     <p class="note">Use a current desktop browser; a tab is a node only while it stays open.</p>
   </div>
+
+  <section id="gr8s">
+    <h2>What is gr8s?</h2>
+    <p><a href="https://github.com/atgreen/gr8s">gr8s</a> is a Kubernetes-compatible cluster in one executable,
+      written from scratch in Common Lisp, with Prolog for the rules behind its <code>gr8s doctor</code>. The API
+      server, scheduler, controllers, node agent, networking (an eBPF dataplane), DNS, Gateway, storage and the
+      Raft-replicated datastore are all in that one binary. You drive it with <code>kubectl</code> and ordinary
+      manifests, and it passes the upstream Kubernetes conformance tests.</p>
+    <div class="grid2">
+      <div class="card"><h3>Ordinary nodes</h3><p>On a Linux machine, a gr8s node runs Pods the way Kubernetes
+        does, with containerd and runc. This demo's own server is one: it serves this page.</p></div>
+      <div class="card"><h3>Browser tab nodes</h3><p>What's new is a node that is a browser tab. It joins the
+        same cluster, takes Pods from the same scheduler, and puts them on the same Pod network, each Pod in a
+        Linux VM compiled to WebAssembly.</p></div>
+      <div class="card"><h3>A real Pod network</h3><p>Pods in your browser have cluster addresses on a network
+        shared with every other node. Tabs connect peer to peer, punching a hole through each other's home
+        routers, so Pods in two visitors' browsers talk directly.</p></div>
+      <div class="card"><h3>Images over BitTorrent</h3><p>Container image layers travel between nodes over the
+        BitTorrent protocol, tab to tab as between ordinary nodes, each piece checked against the layer's
+        digest.</p></div>
+    </div>
+    <p class="note">gr8s is an experiment: a new Kubernetes-compatible implementation, not a supported product.</p>
+  </section>
 
   <section id="how">
     <h2>How it works</h2>
@@ -270,8 +295,8 @@
       <a href="https://github.com/atgreen/gr8s/blob/main/docs/design-browser-nodes.md">design</a>.</p>
   </section>
 
-  <footer>gr8s is a Kubernetes-compatible cluster in one executable. This page is served by the demo's own server,
-    not by a tab.</footer>
+  <footer>gr8s browser nodes demo, created by Anthony Green. gr8s is Open Source (Apache 2.0) and available on
+    <a href="https://github.com/atgreen/gr8s">GitHub</a>. This page is served by the demo's own server, not by a tab.</footer>
 </main>
 </body>
 </html>

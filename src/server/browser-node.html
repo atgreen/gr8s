@@ -87,6 +87,7 @@
   .chip.taint { border-color: var(--warn); color: var(--warn); }
   pre { margin: 0; max-height: 220px; overflow: auto; font: 12px/1.6 var(--mono); color: var(--muted); white-space: pre-wrap; }
   footer { color: var(--faint); font-size: 12px; text-align: center; margin-top: 24px; }
+  footer a { color: var(--accent); }
   @media (max-width: 760px) {
     .stats { grid-template-columns: repeat(2, 1fr); }
     .grid2, .hero { grid-template-columns: 1fr; }
@@ -146,7 +147,9 @@
   </div>
 
   <footer>Closing this tab removes the node; its Pods are rescheduled elsewhere. Workloads here never receive the
-    cluster's secrets. <span id="version"></span></footer>
+    cluster's secrets. <span id="version"></span><br>
+    gr8s, created by Anthony Green, is Open Source (Apache 2.0) and available on
+    <a href="https://github.com/atgreen/gr8s">GitHub</a>.</footer>
 </div>
 
 <script type="module">

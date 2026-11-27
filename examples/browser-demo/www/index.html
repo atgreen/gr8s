@@ -16,6 +16,7 @@
   dt { color: var(--muted); } dd { margin: 0; font-family: ui-monospace, monospace; font-size: 14px; word-break: break-all; }
   p.note { color: var(--muted); font-size: 15px; }
   a { color: var(--accent); }
+  footer { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
 </style>
 <main>
   <h1>This page came from a browser tab.</h1>
@@ -31,6 +32,8 @@
   <p class="note">A web server inside the tab answered, through the cluster's Gateway and the Pod network.
   Whoever runs a tab can change what it does, so before this page reached you the cluster checked it, byte for byte,
   against the file in the image it pulled itself, and filled in the lines above. A tab that serves anything else is turned away.</p>
-  <p class="note"><a href="https://demo.gr8s.io/">Make your browser a node</a> · <a href="https://github.com/atgreen/gr8s">gr8s</a></p>
+  <p class="note"><a href="https://join.demo.gr8s.io/">Make your browser a node</a> · <a href="https://demo.gr8s.io/">About this demo</a></p>
+  <footer>gr8s browser nodes demo, created by Anthony Green. gr8s is Open Source (Apache 2.0) and available on
+    <a href="https://github.com/atgreen/gr8s">GitHub</a>.</footer>
 </main>
 </html>
