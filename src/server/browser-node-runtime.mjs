@@ -463,7 +463,10 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       update(info) {
         self = info.node?.name ?? self;
         peers = info.peers ?? [];
-        iceServers = info.iceServers ?? [];
+        iceServers = [...(info.iceServers ?? [])];
+        // The server's own STUN responder, at the address this page came from.
+        const host = globalThis.location?.hostname;
+        if (info.stunPort && host) iceServers.push({ urls: `stun:${host}:${info.stunPort}` });
         policy = info.ingressPolicy ?? {};
         // Link up with peers as soon as they are known, so a Pod's first packets
         // needn't detour through the server.

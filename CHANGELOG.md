@@ -33,6 +33,14 @@ the Kubernetes API version with a gr8s release suffix (see
   writes them (`2160h0m0s`), and the `renewBefore` rule applies only when a
   Certificate's spec changes.
 
+- Browser nodes connect across NATs (podster-zra1): `serve --browser-stun-listen
+  HOST:PORT` answers STUN binding requests on UDP, so each tab learns the public
+  address its NAT gives it and tabs on different networks connect directly, with no
+  third party seeing visitors' addresses. `--browser-ice-server URL` (repeatable) adds
+  other STUN or TURN servers. `--browser-peering all|same-network|none` says which
+  tabs connect directly, since direct peers learn each other's public address; the
+  default is `same-network`, and the join page says so when it is `all`. Tabs that
+  don't connect directly still reach each other through the server.
 - Checked content from browser Pods (podster-23v9.8): a Service annotated
   `gr8s.io/verified-content-root: DIR` is served at `/verified/NAMESPACE/SERVICE/` on
   the browser join listener. The server asks one of the Service's browser Pods over the

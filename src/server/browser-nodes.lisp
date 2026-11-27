@@ -517,7 +517,8 @@ browser nodes are reached, and each learns whom a signal is from from this serve
   (let ((op (gethash "op" message)))
     (cond ((equal op "signal")
            (let* ((to (gethash "to" message))
-                  (target (and (stringp to) (not (equal to from)) (gethash to (browser-join-sessions acceptor)))))
+                  (target (and (stringp to) (browser-peers-p acceptor from to)
+                               (gethash to (browser-join-sessions acceptor)))))
              (when target
                (ignore-errors
                 (browser-session-send target (core-object "op" "signal" "from" from
@@ -531,12 +532,21 @@ browser nodes are reached, and each learns whom a signal is from from this serve
                            when (and (stringp digest) (cl-ppcre:scan "^sha256:[0-9a-f]{64}$" digest))
                              collect digest))))))))
 
+(defun browser-peers-p (acceptor one other)
+  "Whether browser nodes ONE and OTHER may connect directly, by ACCEPTOR's peering."
+  (and (not (equal one other))
+       (case (browser-join-peering acceptor)
+         (:all t)
+         (:same-network (let ((address (gethash one (browser-join-clients acceptor))))
+                          (and address (equal address (gethash other (browser-join-clients acceptor))))))
+         (t nil))))
+
 (defun browser-node-peers (acceptor self)
-  "The other browser nodes connected through ACCEPTOR, each with its Pod CIDR, which a tab
-may reach directly."
+  "The other browser nodes connected through ACCEPTOR that SELF may reach directly, each with
+its Pod CIDR."
   (coerce (loop for name being the hash-keys of (browser-join-runtimes acceptor) using (hash-value runtime)
                 for network = (browser-runtime-network runtime)
-                unless (or (equal name self) (null network))
+                unless (or (not (browser-peers-p acceptor self name)) (null network))
                   collect (core-object "node" name "cidr" (browser-network-cidr network)))
           'vector))
 
@@ -580,6 +590,9 @@ ask it for RUNTIME's statistics, timing the answer."
                               (when (and acceptor runtime)
                                 (setf (gethash "peers" info) (browser-node-peers acceptor name)
                                       (gethash "iceServers" info) (browser-join-ice-servers acceptor)
+                                      (gethash "stunPort" info) (let ((stun (browser-join-stun acceptor)))
+                                                                  (if stun (browser-stun-port stun) 'null))
+                                      (gethash "peering" info) (string-downcase (browser-join-peering acceptor))
                                       (gethash "ingressPolicy" info) (browser-node-ingress-policy runtime)))
                               (browser-session-send session info))
                 (error () (return)))
@@ -638,6 +651,12 @@ others go through this host.")
               :documentation "How many browser nodes may be connected at once.")
    (max-per-client :initarg :max-per-client :initform 4 :reader browser-join-max-per-client
                    :documentation "How many of them may come from one client address.")
+   (peering :initarg :peering :initform :same-network :reader browser-join-peering
+            :documentation "Which tabs may connect to each other directly, and so learn each
+other's public address: :all, :same-network (tabs whose browsers come from one client
+address) or :none. Tabs that may not still reach each other through this server.")
+   (stun :initform nil :accessor browser-join-stun
+         :documentation "The STUN responder tabs learn their public addresses from, or NIL.")
    (exec-listener :initform nil :accessor browser-join-exec-listener
                   :documentation "The loopback listener serving this listener's exec streams, when
 this one listens elsewhere: the kubelet takes only loopback streaming URLs.")
@@ -807,7 +826,7 @@ stops with the session."
                            (lambda (digest)
                              (loop for node being the hash-keys of (browser-join-holdings acceptor)
                                      using (hash-value digests)
-                                   when (and (not (equal node self)) (gethash node (browser-join-sessions acceptor))
+                                   when (and (browser-peers-p acceptor self node) (gethash node (browser-join-sessions acceptor))
                                              (member digest digests :test #'equal))
                                      collect node))))
                    (start-browser-node-reporter session (virtual-node-host-store host) name
@@ -997,20 +1016,26 @@ process hosts none."
                                 when (realp value) collect (list labels value)))))))))))
 
 (defun start-browser-join-listener (nodes address port &key distro pod-proxy pod-network images
-                                                             (max-nodes 64) (max-per-client 4))
+                                                             (max-nodes 64) (max-per-client 4)
+                                                             (peering :same-network) ice-servers stun)
   "Listen on ADDRESS:PORT for browsers joining as nodes on NODES, serving the join page and
 DISTRO, the root image file Pods boot from, and with POD-PROXY, HTTP to their Pods. With
 POD-NETWORK, their Pods join the cluster network through this host. At most MAX-NODES are
-connected at once, MAX-PER-CLIENT of them from one address. Returns the acceptor."
+connected at once, MAX-PER-CLIENT of them from one address. PEERING says which tabs connect
+directly; they find each other with ICE-SERVERS (URLs) and, with STUN, (address port), a
+STUN responder this listener runs. Returns the acceptor."
   (let ((acceptor (make-instance 'browser-join-acceptor
                                     :address address :port port :nodes nodes :pod-proxy pod-proxy
-                                    :max-nodes max-nodes :max-per-client max-per-client
+                                    :max-nodes max-nodes :max-per-client max-per-client :peering peering
+                                    :ice-servers (map 'vector (lambda (url) (core-object "urls" url)) ice-servers)
                                     :pod-network pod-network
                                     :images (and images (make-browser-images images))
                                     :distro (and distro (pathname distro))
                                     :access-log-destination nil
                                     :message-log-destination *error-output*)))
     (hunchentoot:start acceptor)
+    (when stun
+      (setf (browser-join-stun acceptor) (apply #'start-browser-stun stun)))
     (unless (loopback-address-p address)
       (let ((exec (make-instance 'browser-exec-acceptor :address "127.0.0.1" :port 0
                                                         :access-log-destination nil
@@ -1046,5 +1071,7 @@ connected at once, MAX-PER-CLIENT of them from one address. Returns the acceptor
 
 (defmethod hunchentoot:stop :after ((acceptor browser-join-acceptor) &key soft)
   (declare (ignore soft))
-  (let ((exec (shiftf (browser-join-exec-listener acceptor) nil)))
-    (when exec (ignore-errors (hunchentoot:stop exec :soft nil)))))
+  (let ((exec (shiftf (browser-join-exec-listener acceptor) nil))
+        (stun (shiftf (browser-join-stun acceptor) nil)))
+    (when exec (ignore-errors (hunchentoot:stop exec :soft nil)))
+    (when stun (stop-browser-stun stun))))
