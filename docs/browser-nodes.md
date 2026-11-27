@@ -49,8 +49,8 @@ join listener behind the Gateway rather than exposing it directly.
 ## Publish the join page over HTTPS
 
 The page must be served over HTTPS (or from `localhost`): a tab proves its
-identity with a WebCrypto key, and browsers offer WebCrypto and WebGPU only in a
-secure context. Route a hostname to the join listener through the Gateway, with a
+identity with a WebCrypto key, and browsers offer WebCrypto, WebGPU and the screen
+wake lock that keeps a joined device awake only in a secure context. Route a hostname to the join listener through the Gateway, with a
 certificate from the cert-manager `acme` issuer:
 
 - a Service with no selector, and an EndpointSlice naming the join listener's

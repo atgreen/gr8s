@@ -410,6 +410,53 @@ function describeBrowser() {
   return { name, os };
 }
 
+// Keeps the screen awake while this tab is a node (podster-2yfv): a phone or laptop that
+// dims and sleeps stops running the page, and the node with it. The browser drops the
+// lock whenever the page is hidden, so it is taken again each time the page is shown.
+// Where the Screen Wake Lock API is missing, it does nothing. ONCHANGE hears its state:
+// "held", "released" (the browser let it go), "refused", "unsupported" or "off".
+export function screenWakeLock({ wakeLock = globalThis.navigator?.wakeLock, document = globalThis.document,
+                                 onChange = () => {} } = {}) {
+  let state = "off";
+  const set = (next) => { state = next; onChange(next); };
+  if (typeof wakeLock?.request !== "function") {
+    set("unsupported");
+    return { hold: async () => {}, release: async () => {}, get state() { return state; } };
+  }
+  let wanted = false;
+  let sentinel = null;
+  async function take() {
+    if (!wanted || sentinel || document?.visibilityState === "hidden") return;
+    try {
+      const taken = await wakeLock.request("screen");
+      if (!wanted) { await taken.release(); return; }
+      sentinel = taken;
+      taken.addEventListener?.("release", () => {
+        if (sentinel !== taken) return;
+        sentinel = null;
+        if (wanted) set("released");
+      });
+      set("held");
+    } catch {
+      set("refused");
+    }
+  }
+  const shown = () => { if (document?.visibilityState === "visible") take(); };
+  document?.addEventListener?.("visibilitychange", shown);
+  return {
+    async hold() { wanted = true; await take(); },
+    async release() {
+      wanted = false;
+      document?.removeEventListener?.("visibilitychange", shown);
+      const held = sentinel;
+      sentinel = null;
+      if (held) await held.release();
+      set("off");
+    },
+    get state() { return state; },
+  };
+}
+
 // When to try a direct link to a peer again (podster-99q4). Two tabs that can't reach
 // each other (a symmetric NAT, say, with no TURN) still talk through the server, but
 // each attempt costs signalling and ICE checks, and a layer fetch waits for it; so a

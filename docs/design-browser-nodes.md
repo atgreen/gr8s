@@ -255,7 +255,10 @@ podster-135e and podster-i8my) still help native nodes.
 - **Joining** (`src/server/browser-nodes.lisp`). `serve --browser-listen HOST:PORT`
   serves the page and the session; `--browser-distro FILE` is the root image (erofs)
   the guests boot. Opening the page joins: there is no separate consent step, and the
-  page says what the tab is for and offers to leave.
+  page says what the tab is for and offers to leave. Once joined, it holds a screen
+  wake lock, so a phone or laptop that would dim and sleep keeps the node running.
+  The browser drops the lock while the page is hidden, and the page takes it again
+  when it is shown; the page's "screen" fact says whether it holds one.
 - **Identity.** An ECDSA P-256 key, non-extractable, kept in IndexedDB, and a tab id
   kept in sessionStorage. The node is `browser-` and six hex digits of the key and
   tab; `topology.kubernetes.io/zone` comes from the key alone. A tab reconnecting
