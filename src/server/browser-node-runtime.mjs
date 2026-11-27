@@ -1046,6 +1046,7 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
   }
   let resolveNode, rejectNode, resolveClosed;
   let refusal = null;
+  let retry = false;
   const node = new Promise((resolve, reject) => { resolveNode = resolve; rejectNode = reject; });
   const closed = new Promise((resolve) => (resolveClosed = resolve));
 
@@ -1073,8 +1074,10 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
   };
   socket.onclose = async () => {
     for (const uid of [...pods.keys()]) await deletePod(uid);
-    // Refused (the cluster is full, say) is final; closed before joining isn't.
-    rejectNode(Object.assign(new Error(refusal ?? "the cluster closed the connection"), { refused: refusal !== null }));
+    // Refused (the cluster is full, say) is final, unless the server asked the tab to try
+    // again (it is busy); closed before joining isn't.
+    rejectNode(Object.assign(new Error(refusal ?? "the cluster closed the connection"),
+                             { refused: refusal !== null, retry }));
     resolveClosed();
   };
   socket.onmessage = async (event) => {
@@ -1110,6 +1113,7 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     }
     if (message.op === "refused") {
       refusal = message.reason;
+      retry = message.retry === true;
       return;
     }
     if (message.op === "welcome") {

@@ -26,6 +26,9 @@ gr8s serve --browser-listen 127.0.0.1:8099 --browser-distro /var/lib/gr8s/browse
 | `--browser-distro FILE` | The root image (erofs) each Pod's VM boots: unkernel's Alpine image, from the unkernel release the page loads. |
 | `--browser-max-nodes N` | At most N browser nodes connected at once (default 64). |
 | `--browser-max-per-client N` | At most N of them from one client address (default 4). |
+| `--browser-memory-reserve-mib N` | Take no browser node while the server has less than N MiB of memory to spare, its `MemAvailable` (default 1024; `0` turns it off). |
+| `--browser-busy-above PERCENT` | While the server's CPUs have been busier than this over the last 10 s, not counting niced work, a joining tab is asked to wait. Its page shows "Server busy, retrying…" and tries again, waiting longer each time (default 90; `0` turns it off). |
+| `--browser-starts-at-once N` | Start at most N browser Pods at a time; the rest queue (default 8; `0` turns it off). |
 | `--browser-stun-listen HOST:PORT` | Answer the tabs' STUN requests on UDP, so tabs behind NATs connect directly. |
 | `--browser-ice-server URL` | Also give tabs this `stun:` or `turn:` server. Repeatable. |
 | `--browser-peering MODE` | Which tabs connect directly: `all`, `same-network` (the default) or `none`. |

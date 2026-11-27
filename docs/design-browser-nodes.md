@@ -166,6 +166,48 @@ per-profile host ID, and nodes from one host share a
 `topology.kubernetes.io/zone` value, so topology spread treats them as one failure
 domain.
 
+### How many nodes a server takes
+
+Each browser node costs the server memory: its agent, its session and its Pods'
+network. A crowd joining at once also costs CPU. So a join is also judged by what the
+server has left, as well as by the fixed limits (`--browser-max-nodes`, which stays
+the ceiling, and `--browser-max-per-client`):
+
+- While `MemAvailable` is below a reserve (`--browser-memory-reserve-mib`, 1 GiB),
+  a tab is refused, as when the cluster is full.
+- While the CPUs have been more than 90% busy over the last 10 s
+  (`--browser-busy-above`), a tab is asked to try again, and its page does so with
+  a growing wait. Niced work isn't counted, since the kernel gives that time to
+  anything else that wants it.
+- Browser Pods start at most 8 at a time (`--browser-starts-at-once`). The rest
+  wait their turn, so a wave of joins doesn't have every tab pulling images from the
+  server at once.
+
+#### Measured
+
+2026-11-27, on the lab cluster: an HA pair of 4-CPU, 8 GB members. The join listener
+ran on the follower (gr8s2). One headless Chromium on another machine opened tabs on
+the join page in waves of 10 every 30 s, up to 60
+(`tests/browser-node/scale-run.py`). A second run opened 15 tabs, each running one
+busybox Pod from a DaemonSet.
+
+| | |
+|---|---|
+| server memory per browser node (RSS, and the drop in `MemAvailable`) | about 9 MiB |
+| server CPU per idle browser node | about 2% of the 4 CPUs |
+| server CPU, idle, then with 31 nodes | 12%, then about 80% |
+| a browser Pod, from creation to Ready, 13 Pods in waves of 5 | median 5 s, 95th percentile 20 s |
+| Nodes gone after 53 tabs closed at once | all, within about 40 s |
+| most browser nodes Ready at once | 31 |
+
+The breaking point was 31 nodes. Each browser node's agent holds a node session
+from the server's own address, and the node server takes at most 32 connections
+from one address (podster-7op6). Tabs past that joined and got a Node, but it never
+went Ready. The same cap applies to a single server, whose agents dial it on
+127.0.0.1. Past that cap, CPU is the next limit: at about 2% per node, 4 CPUs pass
+the 90% busy limit near 37 nodes (podster-i7yl). Memory comes last: at 9 MiB per
+node, a 1 GiB reserve on this machine leaves room for about 300 more.
+
 ## Milestones
 
 1. **A virtual node in the server.** `serve` creates a node-runtime object backed by

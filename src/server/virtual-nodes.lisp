@@ -96,23 +96,38 @@ node that stops does. Returns true when NAME was running here."
       (stop-local-node-agent (virtual-node-worker node))
       t)))
 
+(defun call-through-checkpoints (function &key (attempts 30))
+  "Call FUNCTION, and again a second later each time a checkpoint turns it away (a 503),
+up to ATTEMPTS times: a routine checkpoint blocks the store for about a second, and an
+HA member under write load takes them often."
+  (loop for attempt from 1
+        do (handler-case (return (funcall function))
+             (gr8s.model:kubernetes-error (condition)
+               (unless (and (eql 503 (gr8s.model::kubernetes-error-status-code condition)) (< attempt attempts))
+                 (error condition))
+               (sleep 1)))))
+
 (defun forget-virtual-node (host name)
   "Remove NAME's Node, then the Pods bound to it, then its agent's state and so its
 enrollment. The Node goes first, so the replacements its Pods' controllers make can't be
 bound to it."
   (let ((store (virtual-node-host-store host))
         (reconciler (virtual-node-host-reconciler host)))
-    (with-store-lock (store)
-      (let ((current (gr8s.controllers::get-node-unlocked store name)))
-        (when current (gr8s.apiserver::remove-node-unlocked store current))))
+    (call-through-checkpoints
+     (lambda ()
+       (with-store-lock (store)
+         (let ((current (gr8s.controllers::get-node-unlocked store name)))
+           (when current (gr8s.apiserver::remove-node-unlocked store current))))))
     (when reconciler
       ;; As Kubernetes' Pod garbage collector deletes the Pods of a deleted Node, but at
       ;; once: this Node isn't coming back.
       (dolist (pod (gr8s.controllers::list-pods store))
         (when (equal name (gr8s.model::pod-node-name pod))
-          (handler-case (gr8s.apiserver::delete-controller-pod
-                         reconciler (gr8s.model::pod-namespace pod) (gr8s.model::pod-name pod)
-                         "pod-garbage-collector" :uid (gr8s.model::pod-uid pod))
+          (handler-case (call-through-checkpoints
+                         (lambda ()
+                           (gr8s.apiserver::delete-controller-pod
+                            reconciler (gr8s.model::pod-namespace pod) (gr8s.model::pod-name pod)
+                            "pod-garbage-collector" :uid (gr8s.model::pod-uid pod))))
             (error (condition)
               (format *error-output* "gr8s virtual node ~A: Pod ~A/~A: ~A~%" name
                       (gr8s.model::pod-namespace pod) (gr8s.model::pod-name pod) condition))))))

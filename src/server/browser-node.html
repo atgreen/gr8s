@@ -345,7 +345,24 @@
     await node.closed;
     if (leaving) gone(); else await rejoinWhenBack();
   }
-  join().catch((error) => {
+  // A busy server asks the tab to wait: try again later, waiting longer each time.
+  async function joinWhenNotBusy() {
+    for (let wait = 5000; ; wait = Math.min(wait * 2, 120000)) {
+      try {
+        return await join();
+      } catch (error) {
+        if (error?.retry !== true || leaving) throw error;
+        log(String(error.message));
+        setState("joining", "Server busy, retrying…");
+        $("leave").textContent = "Stop retrying";
+        $("leave").onclick = () => { leaving = true; gone(); };
+        await new Promise((resolve) => setTimeout(resolve, wait * (0.5 + Math.random())));
+        if (leaving) return;
+        $("leave").textContent = "Leave the cluster";
+      }
+    }
+  }
+  joinWhenNotBusy().catch((error) => {
     log(String(error?.message ?? error));
     // Joined nothing, but the cluster may only be restarting: try again unless it refused.
     if (tab && error?.refused === false && !leaving) rejoinWhenBack();
