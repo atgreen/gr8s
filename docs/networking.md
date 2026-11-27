@@ -515,6 +515,13 @@ Supported today:
   (`ReplaceFullPath`/`ReplacePrefixMatch`), and request redirect.
 - **HTTPS termination** on a listener, using the cert/key from a referenced
   `kubernetes.io/tls` Secret through the in-image pure-tls stack.
+- **Public certificates from Let's Encrypt** (or any ACME server), through the
+  built-in cert-manager `acme` issuer with HTTP-01 validation. The issuer's
+  Challenges (`acme.cert-manager.io/v1`) reach every node with the Gateway
+  configuration, and every Gateway listener answers
+  `GET /.well-known/acme-challenge/<token>` for the Challenge's host before any
+  route matching, so no solver Pod or HTTPRoute is created. The Gateway needs an
+  `HTTP` listener on port 80 that the public name reaches; see the example below.
 - **L4 routing** for TCPRoute (TCP splice) and TLSRoute/GRPCRoute (SNI
   passthrough: the TLS ClientHello SNI is peeked without terminating and used to
   pick the backend). The agent opens its own connection to the backend, so the
@@ -527,6 +534,45 @@ Supported today:
   `gr8s_gateway_requests_total{gateway,route,code}` on `/metrics`, and a per-route
   token-bucket rate limiter (`gr8s.io/rate-limit-rps` → HTTP 429).
 - **Tracing**, with OpenTelemetry: see below.
+
+### A publicly trusted certificate for a Gateway
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata: {name: letsencrypt}
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory   # staging first: acme-staging-v02
+    email: ops@example.com
+    privateKeySecretRef: {name: letsencrypt-account}          # created in kube-system
+    solvers:
+    - http01:
+        gatewayHTTPRoute:
+          parentRefs: [{name: web, namespace: default}]
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata: {name: demo, namespace: default}
+spec:
+  secretName: demo-tls
+  dnsNames: [demo.example.com]
+  issuerRef: {name: letsencrypt, kind: ClusterIssuer}
+```
+
+Gateway `web` has an `HTTP` listener on port 80 and an `HTTPS` listener whose
+`certificateRefs` names `demo-tls`. The HTTPS listener comes up once the Secret
+exists. `kubectl get challenges` shows validations in progress, and the
+Certificate's `Issuing` and `Ready` conditions say why one failed. After a
+failure the issuer waits 5 minutes before a new order, doubling up to a day
+(`status.failedIssuanceAttempts`, `status.lastFailureTime`), and it defers to a
+`Retry-After` from the server, so a broken setup stays inside Let's Encrypt's
+rate limits. Renewal follows `renewBefore` (default: the last third of the
+validity). The leaf key is RSA 2048. HTTP-01 cannot validate wildcard names, and
+dnsNames are the only identifiers the issuer accepts. Anyone who can write a
+Challenge can answer validations for any host the Gateway serves, as anyone
+who can attach a route there could; keep `acme.cert-manager.io` writes with
+cluster administrators.
 
 ### Gateway tracing (OpenTelemetry)
 

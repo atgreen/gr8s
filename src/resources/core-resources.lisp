@@ -132,6 +132,9 @@
     ("clusterissuers" "ClusterIssuer" "cert-manager.io/v1" nil)
     ("certificates" "Certificate" "cert-manager.io/v1" t)
     ("certificaterequests" "CertificateRequest" "cert-manager.io/v1" t)
+    ;; One pending ACME HTTP-01 validation. The cert-manager controller writes it
+    ;; and every node's Gateway HTTP listener answers its token.
+    ("challenges" "Challenge" "acme.cert-manager.io/v1" t)
     ;; KEP-3257/4317 trust distribution: cluster-scoped CA trust anchors a
     ;; signer publishes, consumed by the clusterTrustBundle projected volume
     ;; source. GA at certificates.k8s.io/v1 in Kubernetes 1.37, the version
@@ -743,7 +746,8 @@ Callbacks run under the store lock and must not read or write the store."
         (let ((*core-resource-change-scope*
                 (if (every (lambda (entry)
                              (member (gethash "resource" entry)
-                                     '("gatewayclasses" "gateways" "httproutes" "tcproutes" "tlsroutes" "grpcroutes")
+                                     '("gatewayclasses" "gateways" "httproutes" "tcproutes" "tlsroutes" "grpcroutes"
+                                       "challenges")
                                      :test #'equal)) desired)
                     :gateway :full))
               (*core-resource-changes* desired))

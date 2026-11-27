@@ -9,6 +9,19 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- A cert-manager `acme` issuer (podster-23v9.4): an Issuer or ClusterIssuer with
+  `spec.acme` gets publicly trusted certificates from Let's Encrypt, or any RFC 8555
+  server, validated over HTTP-01 through `http01.gatewayHTTPRoute` solvers. The
+  controller keeps the account key in the `privateKeySecretRef` Secret (a
+  ClusterIssuer's in `kube-system`), writes an `acme.cert-manager.io/v1` Challenge
+  per pending authorization, and every node's Gateway listeners answer
+  `/.well-known/acme-challenge/<token>` for it before route matching. The issued
+  chain and RSA key land in the Certificate's `kubernetes.io/tls` Secret for an
+  HTTPS listener, and renew like other issuers' certificates. Failed orders back
+  off from 5 minutes, doubling to a day, and a server's `Retry-After` defers the
+  next step. DNS-01, Ingress solvers and external account binding are rejected at
+  admission.
+
 - Browser nodes, first steps (podster-57fv, docs/design-browser-nodes.md): `serve`
   can run node agents for nodes whose containers live elsewhere ("virtual nodes",
   `--virtual-node NAME` on the fake runtime), each enrolled, labelled and tainted

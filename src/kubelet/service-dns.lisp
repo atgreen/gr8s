@@ -14,7 +14,7 @@
     (unless (member kind '("Namespace" "Service" "EndpointSlice" "NetworkPolicy" "ClusterNetworkPolicy" "SecurityProfile"
                            "SandboxProfile" "Ingress" "IngressClass"
                            "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute" "ReferenceGrant"
-                           "Secret" "ClusterTrustBundle" "PodCertificateRequest") :test #'equal)
+                           "Secret" "ClusterTrustBundle" "PodCertificateRequest" "Challenge") :test #'equal)
       (invalid-pod "unsupported public Service discovery kind"))
     (dolist (key '("name" "namespace" "uid" "resourceVersion"))
       (when (gethash key source) (setf (gethash key metadata) (gethash key source))))
@@ -39,6 +39,7 @@
                                               ((equal kind "ClusterNetworkPolicy") "policy.networking.k8s.io/v1alpha2")
                                               ((equal kind "SecurityProfile") "agents.kruise.io/v1alpha1")
                                               ((equal kind "SandboxProfile") "gr8.gr8s.io/v1alpha1")
+                                              ((equal kind "Challenge") "acme.cert-manager.io/v1")
                                               ((member kind '("NetworkPolicy" "Ingress" "IngressClass") :test #'equal)
                                                "networking.k8s.io/v1")
                                               ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute" "ReferenceGrant") :test #'equal)
@@ -120,6 +121,14 @@
          (invalid-pod "only kubernetes.io/tls Secrets are projectable"))
        (setf (gethash "type" result) (gethash "type" object)
              (gethash "data" result) (copy-core-object (gethash "data" object))))
+      ((equal kind "Challenge")
+       ;; A Gateway HTTP listener answers an ACME HTTP-01 validation for dnsName
+       ;; with the key authorization. All three fields are what the ACME server
+       ;; fetches from the public URL anyway; nothing else crosses.
+       (let ((spec (core-object)))
+         (dolist (key '("type" "dnsName" "token" "key"))
+           (setf (gethash key spec) (gethash key (gethash "spec" object))))
+         (setf (gethash "spec" result) spec)))
       ((equal kind "ClusterTrustBundle")
        ;; Trust anchors a node needs for the clusterTrustBundle projected volume
        ;; (KEP-4317). The whole spec (signerName + trustBundle PEM) is public, and
@@ -202,6 +211,16 @@
                          (push secret secrets)))))))
     (nreverse secrets)))
 
+(defun acme-http01-challenges (store)
+  "The ACME HTTP-01 Challenges every node's Gateway HTTP listener answers, so
+   validation succeeds whichever node the public address lands on."
+  (loop for key being the hash-keys of (pod-store-resources store) using (hash-value object)
+        for spec = (gethash "spec" object)
+        when (and (equal "challenges" (first key)) (hash-table-p spec)
+                  (equal "HTTP-01" (gethash "type" spec))
+                  (every (lambda (field) (stringp (gethash field spec))) '("dnsName" "token" "key")))
+          collect object))
+
 (defun build-service-discovery-projection (store &optional previous-cache)
   "Encode a captured view, reusing unchanged immutable rows; return bytes and a bounded cache."
   (labels ((objects (resource)
@@ -233,7 +252,8 @@
                           (objects "clustertrustbundles")
                           (objects "podcertificaterequests")
                           (gateway-referenced-tls-secrets store)
-                          (ingress-referenced-tls-secrets store)))
+                          (ingress-referenced-tls-secrets store)
+                          (acme-http01-challenges store)))
            (encoded
              (mapcar (lambda (object)
                        (let ((entry
@@ -349,6 +369,7 @@
                            ((equal "Secret" (gethash "kind" public)) "secrets")
                            ((equal "ClusterTrustBundle" (gethash "kind" public)) "clustertrustbundles")
                            ((equal "PodCertificateRequest" (gethash "kind" public)) "podcertificaterequests")
+                           ((equal "Challenge" (gethash "kind" public)) "challenges")
                            (t "endpointslices"))))
       (unless (and (stringp name) (plusp (length name))
                    ;; GatewayClass, IngressClass and ClusterTrustBundle are cluster-scoped (no
