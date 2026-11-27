@@ -2149,11 +2149,20 @@ them. A node can't claim another's address or name."
     (declare (ignore directory))
     (let ((service (fake-lb-service "10.96.0.11"))
           (slice (endpointslice-test-object "svc-a" "10.80.16.2" 8080)))
-      (setf (gethash "kubernetes.io/service-name" (gethash "labels" (gethash "metadata" slice))) "svc")
+      ;; A Pod on a tab that left, not ready, listed before the Pod that has its address
+      ;; now: the live one counts.
+      (setf (gethash "kubernetes.io/service-name" (gethash "labels" (gethash "metadata" slice))) "svc"
+            (gethash "endpoints" slice)
+            (vector (gr8s.resources::core-object "addresses" #("10.80.16.2") "nodeName" "browser-gone"
+                                                 "conditions" (gr8s.resources::core-object "ready" nil))
+                    (gr8s.resources::core-object "addresses" #("10.80.16.2") "nodeName" "browser-b"
+                                                 "conditions" (gr8s.resources::core-object "ready" t))
+                    (gr8s.resources::core-object "addresses" #("10.80.32.3") "nodeName" "browser-a"
+                                                 "conditions" (gr8s.resources::core-object "ready" t))))
       (gr8s.resources::create-core-resource store "services" service "default")
       (gr8s.resources::create-core-resource store "endpointslices" slice "default")
       (let ((address (gethash "clusterIP" (gethash "spec" (first (gr8s.resources::list-core-resources store "services"))))))
-        (is (equal '(("10.80.16.2" 8080))
+        (is (equal '(("10.80.16.2" 8080) ("10.80.32.3" 8080))
                    (gr8s.server::browser-service-backends store "browser-a" address 80 "TCP")))
         ;; Another port or protocol, or an address that is no Service's, has none.
         (is (null (gr8s.server::browser-service-backends store "browser-a" address 81 "TCP")))
