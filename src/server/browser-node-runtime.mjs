@@ -268,6 +268,26 @@ function now() {
  * onInfo receives the server's periodic summary of this node, its Pods and the
  * cluster. Returns { close(), node: Promise<name>, closed: Promise }.
  */
+/** What browser this is, as { name, os }: the server shows only names it knows. */
+function describeBrowser() {
+  const ua = globalThis.navigator?.userAgent ?? "";
+  const name = /SamsungBrowser/.test(ua) ? "Samsung Internet"
+    : /Edg\//.test(ua) ? "Edge"
+    : /OPR\//.test(ua) ? "Opera"
+    : /Vivaldi/.test(ua) ? "Vivaldi"
+    : globalThis.navigator?.brave ? "Brave"
+    : /Firefox\//.test(ua) ? "Firefox"
+    : /Chrome\//.test(ua) ? "Chrome"
+    : /Safari\//.test(ua) ? "Safari" : null;
+  const os = /Android/.test(ua) ? "Android"
+    : /iPhone|iPad|iPod/.test(ua) ? "iOS"
+    : /CrOS/.test(ua) ? "ChromeOS"
+    : /Windows/.test(ua) ? "Windows"
+    : /Mac OS X|Macintosh/.test(ua) ? "macOS"
+    : /Linux/.test(ua) ? "Linux" : null;
+  return { name, os };
+}
+
 export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 256, capacity, log = () => {}, onInfo = () => {} }) {
   const pods = new Map(); // uid -> Pod
   const execs = new Map(); // exec id -> { process, pty }
@@ -558,6 +578,7 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
         pods: "4",
       },
       arch: "arm64",
+      browser: describeBrowser(),
     });
   };
   socket.onclose = async () => {

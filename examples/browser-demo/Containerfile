@@ -1,0 +1,9 @@
+# The page demo.gr8s.io's visitors' tabs serve (docs/design-browser-nodes.md): static
+# files, so the server can check every response against what this image holds, and
+# fill in what it vouches for through <!--gr8s:...--> placeholders. Build for arm64,
+# which browser nodes run; nothing here runs at build time, so no emulation is needed:
+#   podman build --platform linux/arm64 -t IMAGE examples/browser-demo
+FROM docker.io/library/busybox:1.37
+COPY www /www
+EXPOSE 8080
+CMD ["httpd", "-f", "-v", "-p", "8080", "-h", "/www"]

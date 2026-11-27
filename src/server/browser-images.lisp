@@ -101,7 +101,9 @@ which registry and repository each layer it may serve comes from."
   directory
   (lock (bt:make-lock "gr8s browser images"))
   (resolved (make-hash-table :test #'equal))
-  (layers (make-hash-table :test #'equal)))
+  (layers (make-hash-table :test #'equal))
+  ;; Each resolved image's regular files, path -> digest (browser-content.lisp).
+  (files (make-hash-table :test #'equal)))
 
 (defun make-browser-images (directory)
   "An image cache for browser nodes under DIRECTORY."

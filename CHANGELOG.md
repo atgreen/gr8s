@@ -22,6 +22,14 @@ the Kubernetes API version with a gr8s release suffix (see
   next step. DNS-01, Ingress solvers and external account binding are rejected at
   admission.
 
+- Checked content from browser Pods (podster-23v9.8): a Service annotated
+  `gr8s.io/verified-content-root: DIR` is served at `/verified/NAMESPACE/SERVICE/` on
+  the browser join listener. The server asks one of the Service's browser Pods over the
+  Pod network and passes the answer on only when it is, byte for byte, the file the
+  image (which the server pulled and checked) holds under DIR. Any other answer fails
+  the request and taints the node `gr8s.io/tampered:NoExecute`. An HTML page that passes
+  gets `<!--gr8s:node-->`, `pod`, `browser`, `image`, `digest`, `file`, `up` and
+  `served-at` filled in by the server. `examples/browser-demo` is such a page.
 - Browser nodes, first steps (podster-57fv, docs/design-browser-nodes.md): `serve`
   can run node agents for nodes whose containers live elsewhere ("virtual nodes",
   `--virtual-node NAME` on the fake runtime), each enrolled, labelled and tainted

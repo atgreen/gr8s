@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Served from a browser tab</title>
+<style>
+  :root { --bg: #fbfaf7; --fg: #1d1d1b; --muted: #6b6a64; --line: #e4e1d8; --accent: #2f6f4f; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #151514; --fg: #ecebe6; --muted: #9b9a93; --line: #2c2b28; --accent: #7fc49d; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.55 system-ui, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 56px 16px; }
+  h1 { font-size: clamp(28px, 6vw, 40px); line-height: 1.15; margin: 0 0 18px; }
+  .who { font-size: 20px; margin: 0 0 28px; }
+  .who b { color: var(--accent); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 8px 18px; margin: 0 0 28px;
+       padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  dt { color: var(--muted); } dd { margin: 0; font-family: ui-monospace, monospace; font-size: 14px; word-break: break-all; }
+  p.note { color: var(--muted); font-size: 15px; }
+  a { color: var(--accent); }
+</style>
+<main>
+  <h1>This page came from a browser tab.</h1>
+  <p class="who">Served by <b><!--gr8s:node--></b>, a Kubernetes node running in someone's <b><!--gr8s:browser--></b>.</p>
+  <dl>
+    <dt>Pod</dt><dd><!--gr8s:pod--></dd>
+    <dt>Image</dt><dd><!--gr8s:image--></dd>
+    <dt>Tab up for</dt><dd><!--gr8s:up--></dd>
+    <dt>Served at</dt><dd><!--gr8s:served-at--></dd>
+    <dt>Checked</dt><dd><!--gr8s:file--> = <!--gr8s:digest--></dd>
+  </dl>
+  <p class="note">A web server inside the tab answered, through the cluster's Gateway and the Pod network.
+  Whoever runs a tab can change what it does, so before this page reached you the cluster checked it, byte for byte,
+  against the file in the image it pulled itself, and filled in the lines above. A tab that serves anything else is turned away.</p>
+  <p class="note"><a href="https://demo.gr8s.io/">Make your browser a node</a> · <a href="https://github.com/atgreen/gr8s">gr8s</a></p>
+</main>
+</html>

@@ -242,6 +242,19 @@ podster-135e and podster-i8my) still help native nodes.
   node admission. ServiceAccount token volumes pass, because the browser runtime
   mounts no volumes.
 - **Capacity.** What the tab offered, clamped to 8 CPUs, 8Gi and 16 Pods.
+- **Checked content** (`src/server/browser-content.lisp`). Whoever runs a tab can change
+  what its Pods do, and browsers offer no attestation, so a response from a browser Pod
+  can't be proven to have been computed faithfully. Its content can be checked, though:
+  the server pulled the image and checked its layers, so it knows every file in it. A
+  Service annotated `gr8s.io/verified-content-root: DIR` is served at
+  `/verified/NAMESPACE/SERVICE/` on the join listener (route it there through the Gateway
+  with a URLRewrite). The server fetches each request from one of the Service's browser
+  Pods over the Pod network, and passes the response on only when its body is the file
+  under DIR, byte for byte. Anything else fails the request and taints the node
+  `gr8s.io/tampered:NoExecute`. Facts the server vouches for (node, Pod, image, digest,
+  how long the tab has been up) are filled into `<!--gr8s:KEY-->` placeholders after the
+  check. The browser's name is the tab's own word, taken only from a fixed list. Only
+  static content can be checked this way.
 - **For trying it.** The join listener can proxy HTTP to browser Pods
   (`:pod-proxy`), off by default. `tests/browser-node/client.mjs` runs the page's
   module under Node.
