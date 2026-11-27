@@ -2044,6 +2044,59 @@ them. A node can't claim another's address or name."
       (connect "browser-c" "203.0.113.9")
       (is (search "as many browser nodes as it takes"
                   (gr8s.server::browser-join-refusal acceptor "browser-d" "203.0.113.10"))))))
+(defun test-tar (entries)
+  "A tar archive of ENTRIES, each (name type contents-or-link)."
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (flet ((pad () (loop until (zerop (mod (length out) 512)) do (vector-push-extend 0 out))))
+      (loop for (name type data) in entries
+            for bytes = (if (char= type #\0) (trivial-utf-8:string-to-utf-8-bytes data) #())
+            for header = (make-array 512 :element-type '(unsigned-byte 8) :initial-element 0)
+            do (flet ((put (start string)
+                        (loop for char across string for index from start
+                              do (setf (aref header index) (char-code char)))))
+                 (put 0 name)
+                 (put 100 "0000644")
+                 (put 124 (format nil "~11,'0O" (length bytes)))
+                 (setf (aref header 156) (char-code type))
+                 (unless (char= type #\0) (put 157 data))
+                 (put 257 "ustar"))
+               (loop for octet across header do (vector-push-extend octet out))
+               (loop for octet across bytes do (vector-push-extend octet out))
+               (pad))
+      (dotimes (i 1024) (vector-push-extend 0 out)))
+    (flexi-streams:make-in-memory-input-stream (coerce out '(simple-array (unsigned-byte 8) (*))))))
+
+(test browser-checked-content-is-what-the-image-holds
+  ;; The server knows a browser Pod's content from the layers it checked: later layers
+  ;; replace and white out earlier ones, as in the container.
+  (let ((files (make-hash-table :test #'equal))
+        (sha (lambda (text) (ironclad:byte-array-to-hex-string
+                             (ironclad:digest-sequence :sha256 (trivial-utf-8:string-to-utf-8-bytes text))))))
+    (gr8s.server::apply-layer-files
+     files (test-tar '(("www/" #\5 "") ("www/index.html" #\0 "<p>one</p>") ("www/old.css" #\0 "a")
+                       ("./www/sub/a.txt" #\0 "x") ("etc/motd" #\0 "hi"))))
+    (gr8s.server::apply-layer-files
+     files (test-tar '(("www/index.html" #\0 "<p>two</p>") ("www/.wh.old.css" #\0 "")
+                       ("www/sub/.wh..wh..opq" #\0 "") ("www/same.html" #\1 "www/index.html"))))
+    (is (equal (funcall sha "<p>two</p>") (gethash "/www/index.html" files)))
+    (is (equal (gethash "/www/index.html" files) (gethash "/www/same.html" files)))
+    (is (null (gethash "/www/old.css" files)))
+    (is (null (gethash "/www/sub/a.txt" files)))
+    (is (equal (funcall sha "hi") (gethash "/etc/motd" files))))
+  (is (equal "/www/index.html" (gr8s.server::browser-content-file "/www" "/")))
+  (is (equal "/www/docs/index.html" (gr8s.server::browser-content-file "/www/" "/docs/")))
+  (is (equal "/www/a.css" (gr8s.server::browser-content-file "/www" "/a.css?v=2")))
+  ;; What the server fills in is escaped; placeholders it doesn't know stay as they are.
+  (is (equal "<b>browser-1&lt;x&gt;</b> <!--gr8s:other-->"
+             (gr8s.server::fill-browser-content "<b><!--gr8s:node--></b> <!--gr8s:other-->"
+                                                '(("node" . "browser-1<x>")))))
+  ;; A tab is believed only about names on a fixed list.
+  (flet ((describe-browser (name os)
+           (gr8s.server::browser-description
+            (gr8s.resources::core-object "browser" (gr8s.resources::core-object "name" name "os" os)))))
+    (is (equal "Firefox on Linux" (describe-browser "Firefox" "Linux")))
+    (is (equal "Safari" (describe-browser "Safari" "<script>")))
+    (is (null (describe-browser "<img src=x>" "Linux")))))
 
 (test a-gone-virtual-node-is-removed-after-its-grace
   ;; A browser node whose tab has gone must not stay a NotReady Node forever; within the

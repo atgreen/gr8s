@@ -143,7 +143,9 @@ join listener, which also serves this runtime's exec streams."
   (peer-handler nil) (layer-holders nil)
   (execs (make-hash-table :test #'equal :synchronized t))
   ;; "namespace/name" -> uid, for the Pod proxy.
-  (names (make-hash-table :test #'equal :synchronized t)))
+  (names (make-hash-table :test #'equal :synchronized t))
+  ;; What browser the tab says it is ("Firefox on Linux"), and when it joined.
+  (browser nil) (joined (get-universal-time)))
 
 (defun make-browser-runtime (session &optional endpoint)
   "A runtime for SESSION's browser, keeping the status the browser reports for each Pod and
@@ -637,7 +639,11 @@ others go through this host.")
    (max-per-client :initarg :max-per-client :initform 4 :reader browser-join-max-per-client
                    :documentation "How many of them may come from one client address.")
    (clients :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-clients
-            :documentation "The client address of each connected browser node, by node name."))
+            :documentation "The client address of each connected browser node, by node name.")
+   (verified :initform 0 :accessor browser-join-verified
+             :documentation "How many responses of browser Pods' checked content passed.")
+   (tampered :initform 0 :accessor browser-join-tampered
+             :documentation "How many didn't, each tainting its node."))
   (:documentation "Serves the join page and accepts browser nodes' sessions."))
 
 (defun browser-join-client-address (acceptor request)
@@ -771,6 +777,7 @@ stops with the session."
                                                              :architecture architecture
                                                              :capacity (browser-node-capacity hello)))
                    (setf (gethash name (browser-join-runtimes acceptor)) runtime
+                         (browser-runtime-browser runtime) (browser-description hello)
                          (browser-runtime-images runtime) (browser-join-images acceptor)
                          (browser-runtime-store runtime) (virtual-node-host-store host))
                    ;; Its Pods' network: the node's Pod CIDR, routed to a device here.
@@ -825,7 +832,9 @@ stops with the session."
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor browser-join-acceptor) request)
   (let ((path (hunchentoot:script-name request)))
-    (cond ((and (uiop:string-prefix-p "/pods/" path) (browser-join-pod-proxy acceptor))
+    (cond ((and (uiop:string-prefix-p "/verified/" path) (browser-join-images acceptor))
+           (serve-browser-content acceptor request path))
+          ((and (uiop:string-prefix-p "/pods/" path) (browser-join-pod-proxy acceptor))
            (proxy-browser-pod acceptor request path))
           ((and (uiop:string-prefix-p "/exec/" path)
                 (string-equal (hunchentoot:header-in :upgrade request) "SPDY/3.1"))
@@ -937,6 +946,13 @@ process hosts none."
                               samples)))
                    (node-label (entry) (list (cons "node" (car entry))))
                    (network (entry) (browser-runtime-network (cdr entry))))
+              (family "gr8s_browser_content_checked_total"
+                      "Responses of browser Pods' checked content, by whether they were what the image holds."
+                      "counter"
+                      (list (list (list (cons "result" "verified"))
+                                  (reduce #'+ listeners :key #'browser-join-verified))
+                            (list (list (cons "result" "tampered"))
+                                  (reduce #'+ listeners :key #'browser-join-tampered))))
               (family "gr8s_browser_nodes" "Browser nodes connected to this process." "gauge"
                       (list (list nil (length nodes))))
               (family "gr8s_browser_node_joins_total" "Browsers that have joined through this process." "counter"
