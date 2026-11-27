@@ -290,12 +290,14 @@
    (defer-authorization :initform nil :accessor fake-acme-defer-authorization)
    (registrations :initform 0 :accessor fake-acme-registrations)
    (account-delay :initform nil :accessor fake-acme-account-delay)
+   (slow-server :initform nil :accessor fake-acme-slow-server)
    (on-new-order :initform nil :accessor fake-acme-on-new-order)
    (lock :initform (bt:make-lock "fake ACME") :reader fake-acme-lock)))
 
 (defmethod gr8s.controllers::cm-acme-account ((acme fake-acme) server email key &key skip-tls-verify)
-  (declare (ignore server email key skip-tls-verify))
+  (declare (ignore email key skip-tls-verify))
   (when (fake-acme-account-delay acme) (sleep (fake-acme-account-delay acme)))
+  (when (equal server (fake-acme-slow-server acme)) (sleep 1.5))
   (bt:with-lock-held ((fake-acme-lock acme)) (incf (fake-acme-registrations acme)))
   (values :client "https://acme.test/acct/1"))
 
@@ -693,3 +695,70 @@
       (setf (gethash "renewBefore" older) "8h")
       (signals gr8s.resources::kubernetes-error
         (gr8s.resources::validate-cert-manager-resource "certificates" certificate older)))))
+
+(test acme-https-listeners-never-answer-http01
+  (let ((gateway (cm-parse "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"Gateway\",
+          \"metadata\":{\"name\":\"web\",\"namespace\":\"certs\"},
+          \"spec\":{\"gatewayClassName\":\"gr8s\",\"listeners\":[
+            {\"name\":\"https\",\"port\":443,\"protocol\":\"HTTPS\",\"hostname\":\"demo.example.com\",
+             \"tls\":{\"certificateRefs\":[{\"name\":\"demo-tls\"}]}}]}}")))
+    (is (zerop (hash-table-count (gr8s.controllers::gateway-acme-challenge-table
+                                  (acme-gateway-view (acme-gateway-class) gateway (acme-challenge-object))))))))
+
+(test acme-slow-registration-for-one-issuer-does-not-hold-up-another
+  (with-temporary-store (store path)
+    (values path)
+    (with-fake-acme (acme clock)
+      (setf (fake-acme-slow-server acme) "https://slow.test/directory")
+      (let* ((threads '())
+             (gr8s.controllers::*cm-acme-run-step*
+               (lambda (thunk) (push (bt:make-thread thunk :name "test ACME step") threads))))
+        (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *acme-issuer*) nil)
+        (let ((slow (cm-parse *acme-issuer*)))
+          (setf (gethash "name" (gethash "metadata" slow)) "slow"
+                (gethash "server" (gethash "acme" (gethash "spec" slow))) "https://slow.test/directory")
+          (gr8s.resources::create-core-resource store "clusterissuers" slow nil))
+        (let ((certificate (cm-parse *acme-certificate*)))
+          (setf (gethash "name" (gethash "metadata" certificate)) "a-slow"
+                (gethash "secretName" (gethash "spec" certificate)) "slow-tls"
+                (gethash "name" (gethash "issuerRef" (gethash "spec" certificate))) "slow")
+          (gr8s.resources::create-core-resource store "certificates" certificate "certs"))
+        (gr8s.resources::create-core-resource store "certificates" (cm-parse *acme-certificate*) "certs")
+        (let ((started (get-internal-real-time)))
+          (gr8s.controllers::reconcile-certificates store nil)
+          ;; The fast issuer's order is placed while the slow one still registers.
+          (loop until (or (find-if (lambda (challenge)
+                                     (uiop:string-prefix-p "demo-" (gethash "name" (gethash "metadata" challenge))))
+                                   (gr8s.resources::list-core-resources store "challenges" "certs"))
+                          (> (- (get-internal-real-time) started) (* 3 internal-time-units-per-second)))
+                do (sleep 0.02))
+          (is (< (/ (- (get-internal-real-time) started) internal-time-units-per-second) 1.0))
+          (is (= 1 (fake-acme-registrations acme)) "the slow registration has not finished yet"))
+        (mapc #'bt:join-thread threads)
+        (is (= 2 (fake-acme-registrations acme)))))))
+
+(test acme-issuer-without-solver-parents-reports-instead-of-ordering
+  (with-temporary-store (store path)
+    (values path)
+    (with-fake-acme (acme clock)
+      (gr8s.resources::create-core-resource store "clusterissuers" (cm-parse *acme-issuer*) nil)
+      (gr8s.resources::create-core-resource store "certificates" (cm-parse *acme-certificate*) "certs")
+      ;; An issuer admitted before parentRefs were required, as the controller reads it.
+      (let* ((issuer (gr8s.resources::get-core-resource store "clusterissuers" nil "letsencrypt"))
+             (solver (aref (gethash "solvers" (gethash "acme" (gethash "spec" issuer))) 0)))
+        (remhash "parentRefs" (gethash "gatewayHTTPRoute" (gethash "http01" solver)))
+        ;; Its status writes are not refused for the newer rule...
+        (finishes (gr8s.resources::validate-cert-manager-resource
+                   "clusterissuers" issuer (gr8s.resources::copy-core-object (gethash "spec" issuer))))
+        (signals gr8s.resources::kubernetes-error
+          (gr8s.resources::validate-cert-manager-resource "clusterissuers" issuer))
+        ;; ...and it places no order, saying why on the issuer and the Certificate.
+        (gr8s.controllers::cm-acme-reconcile
+         store (gr8s.resources::get-core-resource store "certificates" "certs" "demo") issuer))
+      (is (= 0 (fake-acme-orders acme)))
+      (is (= 0 (fake-acme-registrations acme)))
+      (is (search "parentRefs" (gethash "message" (acme-certificate-condition store "Ready"))))
+      (let* ((status (gethash "status" (gr8s.resources::get-core-resource store "clusterissuers" nil "letsencrypt")))
+             (ready (find "Ready" (coerce (gethash "conditions" status) 'list)
+                          :test #'equal :key (lambda (condition) (gethash "type" condition)))))
+        (is (equal "NoUsableSolver" (gethash "reason" ready)))))))

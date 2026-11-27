@@ -521,7 +521,7 @@ Supported today:
   configuration. A Gateway listener answers
   `GET /.well-known/acme-challenge/<token>` for the Challenge's host before any
   route matching, but only where the solver HTTPRoute cert-manager would create
-  would serve the host: on each port, the listener that wins the host (exact
+  would serve the host: on each HTTP port, the HTTP listener that wins the host (exact
   hostname, then the longest wildcard, then one with no hostname, as requests
   are routed) must admit the Certificate's namespace in its `allowedRoutes` and
   be one of the solver's `gatewayHTTPRoute.parentRefs`. Admission requires

@@ -485,9 +485,10 @@ Named, as OTel's HTTP conventions ask, by the method and the route that matched.
                (gateway-acme-solver-parent-refs challenge)))))
 
 (defun gateway-acme-port-indexes (store)
-  "Port -> hostname index of the HTTP/HTTPS listener entries on it, in the
-   order the listener planner admits them, so a host selects the listener
-   real requests for it would reach."
+  "Port -> hostname index of the HTTP listener entries on it, in the order the
+   listener planner admits them, as the router's HTTP snapshot indexes them, so
+   a host selects the listener real requests for it would reach. HTTP-01 is
+   plain HTTP, so HTTPS listeners never answer."
   (let ((entries-by-port (make-hash-table))
         (listener-sets (ignore-errors (list-core-resources store "listenersets"))))
     (dolist (gateway (list-core-resources store "gateways"))
@@ -495,7 +496,7 @@ Named, as OTel's HTTP conventions ask, by the method and the route that matched.
         (dolist (entry (gateway-listener-entries store gateway listener-sets))
           (let ((listener (gateway-listener-entry-listener entry)))
             (when (and (null (gateway-listener-entry-error entry))
-                       (member (gethash "protocol" listener) '("HTTP" "HTTPS") :test #'equal))
+                       (equal "HTTP" (gethash "protocol" listener)))
               (push (list (gethash "hostname" listener) entry)
                     (gethash (gethash "port" listener) entries-by-port)))))))
     (let ((indexes (make-hash-table)))

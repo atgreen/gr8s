@@ -226,7 +226,7 @@
                        (floor total)))))))
     (and (integerp seconds) (plusp seconds) seconds)))
 
-(defun validate-acme-issuer-spec (acme)
+(defun validate-acme-issuer-spec (acme &key (require-parent-refs t))
   "The ACME issuer gr8s implements: an https directory, an account key Secret and
    HTTP-01 solvers answered by the Gateway. DNS-01, Ingress solvers and external
    account binding fail closed rather than being silently ignored."
@@ -257,8 +257,9 @@
                                     "spec.acme.solvers[] must configure http01.gatewayHTTPRoute; other solvers are not implemented"))
              ;; A solver route with no parents attaches to no listener, so nothing would answer.
              (let ((refs (gethash "parentRefs" (gethash "gatewayHTTPRoute" http01))))
-               (unless (and (vectorp refs) (not (stringp refs)) (plusp (length refs))
-                            (every (lambda (ref) (and (hash-table-p ref) (stringp (gethash "name" ref)))) refs))
+               (unless (or (not require-parent-refs)
+                           (and (vectorp refs) (not (stringp refs)) (plusp (length refs))
+                                (every (lambda (ref) (and (hash-table-p ref) (stringp (gethash "name" ref)))) refs)))
                  (core-resource-error 422 "Invalid"
                                       "spec.acme.solvers[].http01.gatewayHTTPRoute.parentRefs must name at least one Gateway"))))))
 
@@ -285,7 +286,11 @@
               (let ((ca (require-object (gethash "ca" spec) "spec.ca")))
                 (require-nonempty-string (gethash "secretName" ca) "spec.ca.secretName")))
              ((equal type "acme")
-              (validate-acme-issuer-spec (require-object (gethash "acme" spec) "spec.acme")))
+              ;; Like renewBefore, a rule newer than some stored issuers: their
+              ;; status writes land, and the controller reports them unusable.
+              (validate-acme-issuer-spec (require-object (gethash "acme" spec) "spec.acme")
+                                         :require-parent-refs
+                                         (not (and old-spec (core-json-equal-p old-spec spec)))))
              (t (core-resource-error 422 "Invalid" "Issuer type ~A is not implemented" type))))))
       ((equal resource "challenges")
        (dolist (field '("url" "authorizationURL" "dnsName" "type" "token" "key"))

@@ -255,11 +255,18 @@
                     (setf (gethash "data" existing) (core-object)))
                   (setf (gethash field (gethash "data" existing)) pem)
                   existing))
-              (create-core-resource store "secrets"
-                                    (core-object "apiVersion" "v1" "kind" "Secret"
-                                                 "metadata" (core-object "name" name "namespace" namespace)
-                                                 "type" "Opaque" "data" (core-object field pem))
-                                    namespace))
+              (handler-case
+                  (create-core-resource store "secrets"
+                                        (core-object "apiVersion" "v1" "kind" "Secret"
+                                                     "metadata" (core-object "name" name "namespace" namespace)
+                                                     "type" "Opaque" "data" (core-object field pem))
+                                        namespace)
+                ;; Issuers sharing the Secret share the account: another step's
+                ;; key won the race, so use that one.
+                (kubernetes-error (condition)
+                  (if (ignore-errors (get-core-resource store "secrets" namespace name))
+                      (return-from cm-acme-account-key (cm-acme-account-key store issuer))
+                      (error condition)))))
           key))))
 
 (defvar *cm-acme-clients* (make-hash-table :test 'equal)
@@ -300,17 +307,29 @@
   "Guards *cm-acme-orders* and *cm-acme-clients*, shared by the reconcile pass
    and the step threads.")
 
-(defvar *cm-acme-registration-lock* (bt:make-lock "gr8s ACME registration")
-  "Held while a client registers, so concurrent steps for one issuer register once.")
+(defvar *cm-acme-registration-locks* (make-hash-table :test 'equal)
+  "Issuer identity -> the lock held while that issuer's client registers, so
+   concurrent steps for one issuer register once and other issuers never wait.")
+
+(defun cm-acme-registration-lock (identity)
+  (bt:with-lock-held (*cm-acme-lock*)
+    (or (gethash identity *cm-acme-registration-locks*)
+        (setf (gethash identity *cm-acme-registration-locks*)
+              (bt:make-lock "gr8s ACME registration")))))
+
+(defun cm-acme-cached-client (identity)
+  (bt:with-lock-held (*cm-acme-lock*) (gethash identity *cm-acme-clients*)))
 
 (defun cm-acme-client (store issuer)
-  "A registered client for ISSUER, cached across passes."
+  "A registered client for ISSUER, cached across passes. Only a registration
+   waits, and only for another registration of the same issuer."
   (let ((identity (cm-acme-issuer-identity issuer)))
-    (bt:with-lock-held (*cm-acme-registration-lock*)
-      (cm-acme-client-locked store issuer identity))))
+    (or (cm-acme-cached-client identity)
+        (bt:with-lock-held ((cm-acme-registration-lock identity))
+          (cm-acme-client-locked store issuer identity)))))
 
 (defun cm-acme-client-locked (store issuer identity)
-  (or (bt:with-lock-held (*cm-acme-lock*) (gethash identity *cm-acme-clients*))
+  (or (cm-acme-cached-client identity)
       (let ((acme (gethash "acme" (gethash "spec" issuer))))
         (multiple-value-bind (client account-url)
             (cm-acme-account *cm-acme-backend* (gethash "server" acme) (gethash "email" acme)
@@ -331,11 +350,42 @@
                   0 10)))
 
 (defun cm-acme-http01-solver (issuer)
-  "The first http01 gatewayHTTPRoute solver; selectors are not implemented."
+  "The first http01 gatewayHTTPRoute solver with parentRefs; selectors are not
+   implemented. A solver route without parents attaches to no listener, so its
+   challenges could never validate."
   (find-if (lambda (solver)
-             (let ((http01 (gethash "http01" solver)))
-               (and (hash-table-p http01) (hash-table-p (gethash "gatewayHTTPRoute" http01)))))
+             (let* ((http01 (gethash "http01" solver))
+                    (route (and (hash-table-p http01) (gethash "gatewayHTTPRoute" http01)))
+                    (refs (and (hash-table-p route) (gethash "parentRefs" route))))
+               (and (vectorp refs) (not (stringp refs)) (plusp (length refs)))))
            (gethash "solvers" (gethash "acme" (gethash "spec" issuer)) #())))
+
+(defparameter +cm-acme-no-solver-message+
+  "No http01.gatewayHTTPRoute solver names parentRefs, so no Gateway listener would answer its challenges"
+  "Why an acme issuer places no orders.")
+
+(defun cm-acme-report-unusable-issuer (store issuer certificate)
+  "Say on ISSUER and CERTIFICATE, once, why no order is placed for it."
+  (let ((metadata (gethash "metadata" issuer)))
+    (unless (equal +cm-acme-no-solver-message+
+                   (let ((condition (cm-acme-status-condition issuer "Ready")))
+                     (and condition (gethash "message" condition))))
+      (cm-acme-check-fence)
+      (ignore-errors
+       (update-core-resource store (cm-acme-issuer-resource issuer)
+                             (gethash "namespace" metadata) (gethash "name" metadata)
+         (lambda (object)
+           (unless (hash-table-p (gethash "status" object))
+             (setf (gethash "status" object) (core-object)))
+           (cm-acme-set-condition (gethash "status" object) "Ready" "False" "NoUsableSolver"
+                                  +cm-acme-no-solver-message+)
+           object)))))
+  (unless (equal +cm-acme-no-solver-message+
+                 (let ((condition (cm-acme-status-condition certificate "Ready")))
+                   (and condition (gethash "message" condition))))
+    (cm-acme-update-status store certificate
+      (lambda (status)
+        (cm-acme-set-condition status "Ready" "False" "NoUsableSolver" +cm-acme-no-solver-message+)))))
 
 (defun cm-acme-write-challenge (store certificate issuer authorization-url dns-name challenge key)
   "Create the Challenge the Gateway answers for DNS-NAME's pending authorization;
@@ -486,7 +536,7 @@
          (client (cm-acme-client store issuer))
          (backend *cm-acme-backend*))
     (unless (cm-acme-http01-solver issuer)
-      (error "the issuer has no http01 gatewayHTTPRoute solver"))
+      (error "~A" +cm-acme-no-solver-message+))
     (unless (cm-acme-order-order-url order)
       ;; The pass may have read the Certificate before another step issued it.
       (let* ((metadata (gethash "metadata" certificate))
@@ -699,6 +749,10 @@
          (stale nil)
          (order nil))
     (push uid *cm-acme-active*)
+    ;; An issuer that can't validate anything places no orders and burns no backoff.
+    (unless (cm-acme-http01-solver issuer)
+      (cm-acme-report-unusable-issuer store issuer certificate)
+      (return-from cm-acme-reconcile nil))
     (bt:with-lock-held (*cm-acme-lock*)
       (setf order (gethash uid *cm-acme-orders*))
       (when (and order (cm-acme-order-running order))
