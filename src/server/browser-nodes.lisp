@@ -171,6 +171,8 @@ join listener, which also serves this runtime's exec streams."
   (images nil)
   ;; The cluster store, for Pods' pull Secrets.
   (store nil)
+  ;; A semaphore every Pod start on this server takes a turn at, or NIL.
+  (starts nil)
   ;; What the browser last reported (its "stats" answer) and how long asking took.
   (stats nil) (rtt nil)
   ;; The join listener's handler for this browser's messages to its peers ("signal",
@@ -263,7 +265,13 @@ there are any."
                                                                         (rest gr8s.foundation::+dns-pod-searches+))
                                                                   'vector)
                                                "options" (coerce gr8s.foundation::+dns-pod-options+ 'vector)))))
-                   (browser-session-call (browser-runtime-session runtime) "ensure" "pod" request)))
+                   (let ((starts (browser-runtime-starts runtime)))
+                     (if starts
+                         (progn (sb-thread:wait-on-semaphore starts)
+                                (unwind-protect
+                                     (browser-session-call (browser-runtime-session runtime) "ensure" "pod" request)
+                                   (sb-thread:signal-semaphore starts)))
+                         (browser-session-call (browser-runtime-session runtime) "ensure" "pod" request)))))
          (status (gethash "status" result))
          (runtime-pod (or (gethash (gr8s.model::pod-uid pod) (gr8s.runtime::fake-runtime-pods runtime))
                           (gr8s.runtime::make-runtime-pod :uid (gr8s.model::pod-uid pod)))))
@@ -690,6 +698,72 @@ ask it for RUNTIME's statistics, timing the answer."
                     until (browser-session-closed session) do (sleep 0.1))))
    :name "gr8s browser node reporter"))
 
+;;; Headroom: whether this server has room for another browser node. A node costs the
+;;; server memory for its agent, its session and its Pods' network, and a crowd joining at
+;;; once costs it CPU, so joins wait while either is short. Work at a lowered priority
+;;; isn't counted as busy: the kernel gives that time to anything else that wants it.
+
+(defun host-memory-available (&optional (path "/proc/meminfo"))
+  "The bytes of memory this host could still give out (MemAvailable), or NIL."
+  (ignore-errors
+   (with-open-file (in path)
+     (loop for line = (read-line in nil)
+           while line
+           when (uiop:string-prefix-p "MemAvailable:" line)
+             return (* 1024 (parse-integer line :start 13 :junk-allowed t))))))
+
+(defun host-cpu-times (&optional (path "/proc/stat"))
+  "This host's CPU time so far, in ticks: (values BUSY TOTAL), where BUSY leaves out
+niced and idle time. NIL when it can't be read."
+  (ignore-errors
+   (with-open-file (in path)
+     (let ((line (read-line in)))
+       (when (uiop:string-prefix-p "cpu " line)
+         ;; user nice system idle iowait irq softirq steal
+         (destructuring-bind (user nice system idle &optional (iowait 0) (irq 0) (softirq 0) (steal 0) &rest guests)
+             (mapcar #'parse-integer (uiop:split-string (string-trim " " (subseq line 4)) :separator " "))
+           (declare (ignore guests))
+           (let ((busy (+ user system irq softirq steal)))
+             (values busy (+ busy nice idle iowait)))))))))
+
+(defparameter +host-busy-window-seconds+ 10
+  "How far back the busy fraction a join is judged by looks.")
+
+(defstruct (host-load (:constructor make-host-load ()))
+  "Samples of this host's CPU time, newest first, each (TIME BUSY TOTAL)."
+  (samples '())
+  (lock (bt:make-lock "gr8s host load")))
+
+(defun host-load-sample (load &key (now (get-internal-real-time)) busy total)
+  "Record LOAD's CPU time now (BUSY and TOTAL ticks, read from the host when not given),
+keeping a window's worth of samples."
+  (multiple-value-bind (busy total) (if total (values busy total) (host-cpu-times))
+    (when total
+      (bt:with-lock-held ((host-load-lock load))
+        (let ((oldest (- now (* (1+ +host-busy-window-seconds+) internal-time-units-per-second))))
+          (setf (host-load-samples load)
+                (cons (list now busy total)
+                      (remove-if (lambda (sample) (< (first sample) oldest)) (host-load-samples load)))))))))
+
+(defun host-load-busy (load)
+  "The fraction of LOAD's host's CPU time that went to work, not counting niced work,
+over the samples it holds, or NIL before it has two."
+  (bt:with-lock-held ((host-load-lock load))
+    (let ((newest (first (host-load-samples load)))
+          (oldest (car (last (host-load-samples load)))))
+      (when (and newest (not (eq newest oldest)) (> (third newest) (third oldest)))
+        (/ (- (second newest) (second oldest)) (float (- (third newest) (third oldest)) 1d0))))))
+
+(defun browser-join-headroom-refusal (available reserve busy busy-above)
+  "Why a server with AVAILABLE bytes of memory to give and BUSY (a fraction) of its CPU in
+use takes no browser node now, or NIL; and, second, whether the browser should try again
+by itself. Below a RESERVE of memory it is refused, as when the cluster is full; above
+BUSY-ABOVE (a fraction) it is asked to wait. Either limit, or reading, may be NIL."
+  (cond ((and reserve available (< available reserve))
+         (values "this server has no memory to spare for another browser node; try again later" nil))
+        ((and busy-above busy (> busy busy-above))
+         (values "this server is busy; this tab will try again shortly" t))))
+
 ;;; Joining: the listener a browser connects to
 
 (defparameter +browser-node-runtime-js+ #.(dashboard-agent-asset-text "browser-node-runtime.mjs")
@@ -746,6 +820,16 @@ others go through this host.")
    (stopping :initform nil :accessor browser-join-stopping
              :documentation "Whether this listener is stopping: its sessions end with the server,
 and their nodes are only stopped, for their tabs to come back to.")
+   (memory-reserve :initarg :memory-reserve :initform nil :reader browser-join-memory-reserve
+                   :documentation "Bytes of memory the server keeps: no browser joins while it has
+less to give, or NIL.")
+   (busy-above :initarg :busy-above :initform nil :reader browser-join-busy-above
+               :documentation "A fraction of the CPU: browsers wait to join while the server's,
+leaving out niced work, has been busier than that, or NIL.")
+   (load :initform nil :accessor browser-join-load
+         :documentation "This host's CPU load, sampled while BUSY-ABOVE is set.")
+   (starts :initarg :starts :initform nil :reader browser-join-starts
+           :documentation "A semaphore bounding how many browser Pods start at once, or NIL.")
    (max-nodes :initarg :max-nodes :initform 64 :reader browser-join-max-nodes
               :documentation "How many browser nodes may be connected at once.")
    (max-per-client :initarg :max-per-client :initform 4 :reader browser-join-max-per-client
@@ -784,16 +868,23 @@ by sending the header, as only this host's proxies are believed."
         (string-trim " " (car (last (uiop:split-string forwarded :separator ","))))
         peer)))
 
-(defun browser-join-refusal (acceptor name client)
-  "Why the browser at CLIENT may not join as node NAME now, or NIL. A node already
-connected may always come back, as a reload of its tab replaces its session."
+(defun browser-join-refusal (acceptor name client &key (available (and (browser-join-memory-reserve acceptor)
+                                                                       (host-memory-available)))
+                                                     (busy (and (browser-join-load acceptor)
+                                                                (host-load-busy (browser-join-load acceptor)))))
+  "Why the browser at CLIENT may not join as node NAME now, or NIL; and, second, whether
+it should try again by itself. AVAILABLE is the server's memory to give and BUSY its CPU
+in use, read from the host by default. A node already connected may always come back,
+as a reload of its tab replaces its session."
   (unless (gethash name (browser-join-sessions acceptor))
     (cond ((>= (hash-table-count (browser-join-sessions acceptor)) (browser-join-max-nodes acceptor))
            "this cluster has as many browser nodes as it takes; try again later")
           ((>= (loop for address being the hash-values of (browser-join-clients acceptor)
                      count (equal address client))
                (browser-join-max-per-client acceptor))
-           "this network already has as many browser nodes as one may; close another tab first"))))
+           "this network already has as many browser nodes as one may; close another tab first")
+          (t (browser-join-headroom-refusal available (browser-join-memory-reserve acceptor)
+                                            busy (browser-join-busy-above acceptor))))))
 
 (defun hex-prefix (octets count)
   (format nil "~(~{~2,'0x~}~)" (coerce (subseq octets 0 count) 'list)))
@@ -912,9 +1003,10 @@ stops with the session."
                  (unless (and (hash-table-p hello) (equal "hello" (gethash "op" hello)))
                    (error "a browser node must say hello first"))
                  (multiple-value-bind (identity zone) (browser-node-identity session stream hello)
-                   (let ((refusal (browser-join-refusal acceptor identity client)))
+                   (multiple-value-bind (refusal retry) (browser-join-refusal acceptor identity client)
                      (when refusal
-                       (browser-session-send session (core-object "op" "refused" "reason" refusal))
+                       (browser-session-send session (core-object "op" "refused" "reason" refusal
+                                                                  "retry" (and retry t)))
                        (error "refused ~A from ~A: ~A" identity client refusal)))
                    (fence-browser-node acceptor identity)
                    (setf (gethash identity (browser-join-clients acceptor)) client)
@@ -940,6 +1032,7 @@ stops with the session."
                                                              :architecture architecture
                                                              :capacity (browser-node-capacity hello)))
                    (setf (gethash name (browser-join-runtimes acceptor)) runtime
+                         (browser-runtime-starts runtime) (browser-join-starts acceptor)
                          (browser-runtime-browser runtime) (browser-description hello)
                          (browser-runtime-images runtime) (browser-join-images acceptor)
                          (browser-runtime-store runtime) (virtual-node-host-store host))
@@ -1198,7 +1291,8 @@ process hosts none."
                                                              (max-nodes 64) (max-per-client 4)
                                                              (peering :same-network) ice-servers stun
                                                              (forward-client-address t)
-                                                             (silence-seconds +browser-session-silence-seconds+))
+                                                             (silence-seconds +browser-session-silence-seconds+)
+                                                             memory-reserve busy-above (starts-at-once 8))
   "Listen on ADDRESS:PORT for browsers joining as nodes on NODES, serving the join page and
 DISTRO, the root image file Pods boot from, and with POD-PROXY, HTTP to their Pods. With
 POD-NETWORK, their Pods join the cluster network through this host. At most MAX-NODES are
@@ -1206,12 +1300,18 @@ connected at once, MAX-PER-CLIENT of them from one address. PEERING says which t
 directly; they find each other with ICE-SERVERS (URLs) and, with STUN, (address port), a
 STUN responder this listener runs. FORWARD-CLIENT-ADDRESS says whether checked content tells
 a browser Pod the visitor's address. A browser silent for SILENCE-SECONDS (NIL: however
-long) is taken to have gone. Returns the acceptor."
+long) is taken to have gone. No browser joins while the server has less than
+MEMORY-RESERVE bytes of memory to give, nor, asked to try again, while more than BUSY-ABOVE
+(a fraction) of its CPU has been in use; STARTS-AT-ONCE browser Pods start at a time
+(NIL: any number). Returns the acceptor."
   (let ((acceptor (make-instance 'browser-join-acceptor
                                     :address address :port port :nodes nodes :pod-proxy pod-proxy
                                     :max-nodes max-nodes :max-per-client max-per-client :peering peering
                                     :forward-client-address forward-client-address
                                     :silence-seconds silence-seconds
+                                    :memory-reserve memory-reserve :busy-above busy-above
+                                    :starts (and starts-at-once (sb-thread:make-semaphore :count starts-at-once
+                                                                                          :name "gr8s browser Pod starts"))
                                     :ice-servers (map 'vector (lambda (url) (core-object "urls" url)) ice-servers)
                                     :pod-network pod-network
                                     :images (and images (make-browser-images images))
@@ -1219,6 +1319,14 @@ long) is taken to have gone. Returns the acceptor."
                                     :access-log-destination nil
                                     :message-log-destination *error-output*)))
     (hunchentoot:start acceptor)
+    (when busy-above
+      (let ((load (make-host-load)))
+        (setf (browser-join-load acceptor) load)
+        (bt:make-thread (lambda ()
+                          (loop until (browser-join-stopping acceptor)
+                                do (ignore-errors (host-load-sample load))
+                                   (loop repeat 20 until (browser-join-stopping acceptor) do (sleep 0.1))))
+                        :name "gr8s browser join load")))
     (when stun
       (setf (browser-join-stun acceptor) (apply #'start-browser-stun stun)))
     (unless (loopback-address-p address)

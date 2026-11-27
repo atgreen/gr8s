@@ -28,6 +28,9 @@ the Kubernetes API version with a gr8s release suffix (see
   used to stay until its lease lapsed and the Pod garbage collector caught up. A tab
   that stops answering pings for 10 s, because its machine slept or lost its
   network, counts as closed.
+- Removing a browser node waits out a checkpoint instead of leaving its Node behind.
+  On an HA member under load, a routine checkpoint turns writes away for about a
+  second, and a removal or sweep that met one failed and left the Node NotReady.
 - Pods bound to a Node that no longer exists are deleted, as Kubernetes' Pod garbage
   collector does, once the Node has been gone 40 s, so their controllers replace them
   (podster-k988). A browser node whose tab closed left its Pods bound for good, not
@@ -46,6 +49,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- Browser joins wait for the server's headroom (podster-vyec). While its spare
+  memory is under a reserve (`--browser-memory-reserve-mib`, 1 GiB) a tab is
+  refused. While its CPUs have been over 90% busy (`--browser-busy-above`, not
+  counting niced work), the tab is asked to wait, and its page shows "Server busy,
+  retrying…" and tries again. At most 8 browser Pods start at once
+  (`--browser-starts-at-once`).
 - Checked content tells the browser Pod about the visitor, as a reverse proxy would:
   their `User-Agent`, `Referer` and `Accept-Language`, `X-Forwarded-Proto` and
   `X-Forwarded-Host`, and their address as `X-Forwarded-For` and `X-Real-IP`. The Pod's

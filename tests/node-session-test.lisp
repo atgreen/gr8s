@@ -2567,6 +2567,78 @@ Returns the server's next message."
       (connect "browser-c" "203.0.113.9")
       (is (search "as many browser nodes as it takes"
                   (gr8s.server::browser-join-refusal acceptor "browser-d" "203.0.113.10"))))))
+
+(test browser-joins-wait-for-the-servers-headroom
+  ;; podster-vyec: a server short of memory takes no more browser nodes, and one whose CPUs
+  ;; are busy, niced work aside, asks tabs to try again shortly. A node already connected
+  ;; may still come back.
+  (let ((acceptor (make-instance 'gr8s.server::browser-join-acceptor :nodes nil :max-nodes 10 :max-per-client 10
+                                                                      :memory-reserve (* 1024 1024 1024) :busy-above 9/10))
+        (gib (* 1024 1024 1024)))
+    (flet ((refusal (name &key (available (* 4 gib)) (busy 0.2d0))
+             (multiple-value-list (gr8s.server::browser-join-refusal acceptor name "198.51.100.1"
+                                                                     :available available :busy busy))))
+      (is (equal '(nil) (refusal "browser-a")))
+      (destructuring-bind (reason retry) (refusal "browser-a" :available (1- gib))
+        (is (search "no memory to spare" reason))
+        (is (null retry)))
+      (destructuring-bind (reason retry) (refusal "browser-a" :busy 0.95d0)
+        (is (search "busy" reason))
+        (is-true retry))
+      ;; Readings it couldn't take don't keep anyone out.
+      (is (equal '(nil) (refusal "browser-a" :available nil :busy nil)))
+      (setf (gethash "browser-a" (gr8s.server::browser-join-sessions acceptor)) t)
+      (is (equal '(nil) (refusal "browser-a" :available 0 :busy 1d0))))
+    ;; Without limits, nothing is read and nothing refused.
+    (is (null (gr8s.server::browser-join-refusal
+               (make-instance 'gr8s.server::browser-join-acceptor :nodes nil) "browser-b" "198.51.100.1"))))
+  ;; The host's readings: MemAvailable, and CPU time with niced and idle time left out of busy.
+  (uiop:with-temporary-file (:pathname meminfo :stream out :direction :output)
+    (format out "MemTotal:        8000000 kB~%MemFree:          100000 kB~%MemAvailable:    2048000 kB~%")
+    (finish-output out)
+    (is (= (* 2048000 1024) (gr8s.server::host-memory-available meminfo))))
+  (uiop:with-temporary-file (:pathname stat :stream out :direction :output)
+    (format out "cpu  100 50 20 800 10 3 2 5 0 0~%cpu0 50 25 10 400 5 1 1 2 0 0~%")
+    (finish-output out)
+    (is (equal '(130 990) (multiple-value-list (gr8s.server::host-cpu-times stat)))))
+  (is (null (gr8s.server::host-memory-available "/nonexistent/meminfo")))
+  ;; The busy fraction over the window it samples.
+  (let ((load (gr8s.server::make-host-load))
+        (second internal-time-units-per-second))
+    (gr8s.server::host-load-sample load :now (* 100 second) :busy 1000 :total 10000)
+    (is (null (gr8s.server::host-load-busy load)))
+    (gr8s.server::host-load-sample load :now (* 105 second) :busy 1950 :total 11000)
+    (is (< 0.94 (gr8s.server::host-load-busy load) 0.96))
+    ;; Samples older than the window are dropped.
+    (gr8s.server::host-load-sample load :now (* 130 second) :busy 2050 :total 12000)
+    (is (null (gr8s.server::host-load-busy load)))
+    (gr8s.server::host-load-sample load :now (* 135 second) :busy 2150 :total 13000)
+    (is (< 0.09 (gr8s.server::host-load-busy load) 0.11))))
+
+(test a-busy-server-asks-the-tab-to-try-again
+  ;; The page's own runtime, under Node, hears whether to try again by itself.
+  (with-temporary-store (store path)
+    (let* ((host (gr8s.server::make-virtual-node-host store nil nil (merge-pathnames "virtual/" path)))
+           (listener (gr8s.server::start-browser-join-listener host "127.0.0.1" 0 :busy-above 1/2))
+           (load (gr8s.server::make-host-load)))
+      (unwind-protect
+           (progn
+             ;; Busy all the while: the sampler's own readings are replaced.
+             (setf (gr8s.server::browser-join-load listener) load)
+             (gr8s.server::host-load-sample load :now 0 :busy 0 :total 100)
+             (gr8s.server::host-load-sample load :now 1 :busy 99 :total 200)
+             (let ((output (ignore-errors
+                            (uiop:run-program (list "node" (namestring (asdf:system-relative-pathname
+                                                                        "gr8s" "tests/browser-node/refused-check.mjs"))
+                                                    (format nil "ws://127.0.0.1:~D/socket" (hunchentoot:acceptor-port listener)))
+                                              :output :string :error-output nil))))
+               (if (null output)
+                   (skip "node is not available to run the tab's runtime")
+                   (let ((result (com.inuoe.jzon:parse output)))
+                     (is (search "busy" (gethash "message" result)))
+                     (is (eq t (gethash "refused" result)))
+                     (is (eq t (gethash "retry" result)))))))
+        (hunchentoot:stop listener)))))
 (defun test-tar (entries)
   "A tar archive of ENTRIES, each (name type contents-or-link)."
   (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
@@ -2641,6 +2713,19 @@ Returns the server's next message."
         (is (equal '("browser-elsewhere" "worker")
                    (mapcar #'gr8s.model::node-record-name (gr8s.controllers::list-nodes store))))
         (is (null (probe-file (merge-pathnames "virtual/browser-gone/" path))))))))
+
+(test a-gone-virtual-node-is-removed-through-a-checkpoint
+  ;; A checkpoint blocks the store for about a second, and an HA member under load takes
+  ;; them often: removing a node that meets one waits it out instead of leaving the Node.
+  (with-temporary-store (store path)
+    (let ((host (gr8s.server::make-virtual-node-host store nil nil (merge-pathnames "virtual/" path))))
+      (gr8s.controllers::register-node
+       store (gr8s.model::make-node-record :id "browser-blocked" :name "browser-blocked" :pod-cidr "10.88.1.0/24"))
+      (setf (gr8s.store::pod-store-access-blocked store) :blocked)
+      (let ((unblock (bt:make-thread (lambda () (sleep 1.5) (setf (gr8s.store::pod-store-access-blocked store) nil)))))
+        (gr8s.server::forget-virtual-node host "browser-blocked")
+        (bt:join-thread unblock))
+      (is (null (ignore-errors (gr8s.controllers::get-node store "browser-blocked")))))))
 
 (test control-plane-logs-come-from-the-assigned-remote-agent
   (with-temporary-store (store path)
