@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gr8s browser nodes demo</title>
+<meta name="description" content="A Kubernetes-compatible cluster whose worker nodes are visitors' web browser tabs.">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%233b6ef5'/%3E%3Cstop offset='1' stop-color='%238b5cf6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Ctext x='16' y='21.5' font-family='system-ui,sans-serif' font-size='15' font-weight='700' fill='%23fff' text-anchor='middle'%3Eg8%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f4f6fa; --panel: #ffffff; --panel-2: #f8f9fc; --fg: #172033; --muted: #5d6779;
+    --faint: #8a93a6; --line: #e2e6ee; --accent: #3b6ef5; --accent-2: #8b5cf6; --accent-soft: #e8eefe;
+    --ok: #13915f; --ok-soft: #e3f6ee; --warn: #b7791f; --warn-soft: #fdf3e1;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --shadow: 0 1px 2px rgba(23, 32, 51, .06), 0 8px 24px rgba(23, 32, 51, .06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1420; --panel: #161c2b; --panel-2: #1b2234; --fg: #e6e9f2; --muted: #a3acbf;
+      --faint: #707a90; --line: #2a3349; --accent: #7a9cff; --accent-2: #a78bfa; --accent-soft: #1f2a4a;
+      --ok: #3ccf91; --ok-soft: #14322a; --warn: #f0b45a; --warn-soft: #3a2c15;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 64px; }
+  a { color: var(--accent); }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -.01em; color: var(--fg); text-decoration: none; }
+  .logo { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, var(--accent), var(--accent-2));
+          display: grid; place-items: center; color: #fff; font-size: 14px; font-weight: 700; }
+  nav a { margin-left: 16px; font-size: 14px; text-decoration: none; color: var(--muted); }
+  nav a:hover { color: var(--accent); }
+  .hero { margin-top: 40px; }
+  .eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: 13px; font-weight: 600; color: var(--muted); }
+  h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.12; letter-spacing: -.025em; margin: 8px 0 16px; }
+  h1 span { background: linear-gradient(135deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { font-size: 19px; color: var(--muted); max-width: 720px; margin: 0; }
+  .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 28px; }
+  .button { display: inline-flex; align-items: center; gap: 8px; padding: 12px 20px; border-radius: 12px; font-weight: 600;
+            text-decoration: none; border: 1px solid var(--line); background: var(--panel); color: var(--fg); box-shadow: var(--shadow); }
+  .button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .button:hover { transform: translateY(-1px); }
+  .note { font-size: 14px; color: var(--faint); margin-top: 12px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 28px; box-shadow: var(--shadow); margin-top: 24px; }
+  h2 { font-size: 22px; letter-spacing: -.01em; margin: 0 0 12px; }
+  h3 { font-size: 16px; margin: 0 0 6px; }
+  p { margin: 0 0 12px; }
+  .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; counter-reset: step; margin-top: 16px; }
+  .step { background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; padding: 16px; counter-increment: step; }
+  .step::before { content: counter(step); display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
+                  background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 14px; margin-bottom: 8px; }
+  .step p { color: var(--muted); font-size: 15px; margin: 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .card p { color: var(--muted); font-size: 15px; margin: 0; }
+  code { font-family: var(--mono); font-size: .9em; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 5px; }
+  figure { margin: 18px 0 0; }
+  figcaption { font-size: 14px; color: var(--faint); margin-top: 10px; }
+  .diagram { width: 100%; height: auto; display: block; }
+  .diagram .box { fill: var(--panel-2); stroke: var(--line); stroke-width: 1.5; }
+  .diagram .server { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+  .diagram .vm { fill: var(--panel); stroke: var(--accent-2); stroke-width: 1.2; }
+  .diagram .t { fill: var(--fg); font: 600 15px system-ui, sans-serif; }
+  .diagram .s { fill: var(--muted); font: 12.5px system-ui, sans-serif; }
+  .diagram .m { fill: var(--muted); font: 11.5px ui-monospace, Menlo, monospace; }
+  .diagram .ws { stroke: var(--accent); stroke-width: 2.2; fill: none; }
+  .diagram .p2p { stroke: var(--ok); stroke-width: 2.6; fill: none; stroke-dasharray: 7 5; }
+  .diagram .web { stroke: var(--warn); stroke-width: 2.2; fill: none; }
+  .diagram .reg { stroke: var(--faint); stroke-width: 1.8; fill: none; stroke-dasharray: 3 4; }
+  .diagram .lbl { font: 600 12.5px system-ui, sans-serif; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 14px; color: var(--muted); margin-top: 12px; }
+  .legend i { display: inline-block; width: 26px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: 8px; }
+  ul.points { margin: 8px 0 0; padding-left: 20px; color: var(--muted); }
+  ul.points li { margin: 6px 0; }
+  ul.points b { color: var(--fg); font-weight: 600; }
+  footer { margin-top: 36px; font-size: 14px; color: var(--faint); text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <a class="brand" href="https://github.com/atgreen/gr8s"><span class="logo">g8</span>gr8s</a>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#p2p">Peer to peer</a>
+      <a href="#checked">Checked content</a>
+      <a href="#safety">Safety and privacy</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <div class="eyebrow">The gr8s browser nodes demo</div>
+    <h1>A cluster whose nodes are <span>browser tabs</span></h1>
+    <p class="lede">Open the join page and your tab becomes a worker node of a real, Kubernetes-compatible
+      cluster. The scheduler sends it Pods; each one runs in its own Linux VM inside your browser. Nothing
+      is installed on your machine, and closing the tab leaves the cluster.</p>
+    <div class="actions">
+      <a class="button primary" href="https://join.demo.gr8s.io/">Join with this tab →</a>
+      <a class="button" href="https://tabs.demo.gr8s.io/">See the page tabs serve</a>
+      <a class="button" href="https://github.com/atgreen/gr8s">Source on GitHub</a>
+    </div>
+    <p class="note">Use a current desktop browser; a tab is a node only while it stays open.</p>
+  </div>
+
+  <section id="how">
+    <h2>How it works</h2>
+    <p>One small server in Nuremberg runs <a href="https://github.com/atgreen/gr8s">gr8s</a>: the API server,
+      the scheduler, the controllers, a Gateway and a STUN responder. Everything else happens in visitors' tabs.</p>
+    <div class="steps">
+      <div class="step"><h3>You join</h3><p>The join page connects to the server over a WebSocket and proves who it is with
+        a key your browser keeps. A reload is the same node; a closed tab is a node that has gone.</p></div>
+      <div class="step"><h3>The server makes you a node</h3><p>Your tab appears in <code>kubectl get nodes</code> as
+        <code>browser-…</code>, <code>arm64</code>, with the capacity it offers. The kubelet's half of the work stays
+        on the server; your tab only runs containers.</p></div>
+      <div class="step"><h3>Pods arrive</h3><p>A DaemonSet puts a web server Pod on every tab. Its image's layers come
+        from other tabs where they can, checked piece by piece, and it boots in a
+        <a href="https://github.com/pithings/unkernel">Linux VM compiled to WebAssembly</a>.</p></div>
+      <div class="step"><h3>It serves the world</h3><p>Anyone opening <a href="https://tabs.demo.gr8s.io/">tabs.demo.gr8s.io</a>
+        gets a page from one of those tabs, after the server has checked it against the image.</p></div>
+    </div>
+
+    <figure>
+      <svg class="diagram" viewBox="0 0 960 560" role="img" aria-labelledby="dtitle ddesc">
+        <title id="dtitle">How the demo fits together</title>
+        <desc id="ddesc">Two visitors' tabs connect to the gr8s server over WebSockets and to each other directly over WebRTC.
+          A web visitor's request goes through the Gateway on the server to one tab's Pod and back, checked.</desc>
+        <defs>
+          <marker id="a-ws" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/></marker>
+          <marker id="a-p2p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ok)"/></marker>
+          <marker id="a-web" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--warn)"/></marker>
+          <marker id="a-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--faint)"/></marker>
+        </defs>
+
+        <!-- The server -->
+        <rect class="server" x="330" y="170" width="300" height="190" rx="16"/>
+        <text class="t" x="480" y="200" text-anchor="middle">demo.gr8s.io server</text>
+        <text class="s" x="480" y="221" text-anchor="middle">gr8s: API, scheduler, controllers</text>
+        <rect class="box" x="350" y="238" width="260" height="44" rx="8"/>
+        <text class="s" x="480" y="265" text-anchor="middle">each tab's node agent and Pod network</text>
+        <rect class="box" x="350" y="296" width="125" height="44" rx="8"/>
+        <text class="s" x="412" y="323" text-anchor="middle">Gateway (HTTPS)</text>
+        <rect class="box" x="485" y="296" width="125" height="44" rx="8"/>
+        <text class="s" x="547" y="323" text-anchor="middle">STUN, UDP 3478</text>
+
+        <!-- Tab A -->
+        <rect class="box" x="30" y="40" width="250" height="200" rx="16"/>
+        <text class="t" x="155" y="70" text-anchor="middle">Your browser tab</text>
+        <text class="m" x="155" y="90" text-anchor="middle">node browser-3cc66c</text>
+        <rect class="vm" x="52" y="106" width="206" height="54" rx="10"/>
+        <text class="s" x="155" y="129" text-anchor="middle">Pod tab-web: nginx</text>
+        <text class="m" x="155" y="147" text-anchor="middle">Linux VM (WebAssembly)</text>
+        <rect class="vm" x="52" y="170" width="206" height="50" rx="10"/>
+        <text class="s" x="155" y="191" text-anchor="middle">more Pods, each its own VM</text>
+        <text class="m" x="155" y="208" text-anchor="middle">10.80.32.0/20</text>
+
+        <!-- Tab B -->
+        <rect class="box" x="30" y="330" width="250" height="200" rx="16"/>
+        <text class="t" x="155" y="360" text-anchor="middle">Another visitor's tab</text>
+        <text class="m" x="155" y="380" text-anchor="middle">node browser-48b963</text>
+        <rect class="vm" x="52" y="396" width="206" height="54" rx="10"/>
+        <text class="s" x="155" y="419" text-anchor="middle">Pod tab-web: nginx</text>
+        <text class="m" x="155" y="437" text-anchor="middle">Linux VM (WebAssembly)</text>
+        <rect class="vm" x="52" y="460" width="206" height="50" rx="10"/>
+        <text class="s" x="155" y="481" text-anchor="middle">more Pods, each its own VM</text>
+        <text class="m" x="155" y="498" text-anchor="middle">10.80.48.0/20</text>
+
+        <!-- Web visitor and registry -->
+        <rect class="box" x="700" y="380" width="230" height="110" rx="16"/>
+        <text class="t" x="815" y="412" text-anchor="middle">A web visitor</text>
+        <text class="s" x="815" y="434" text-anchor="middle">opens tabs.demo.gr8s.io</text>
+        <text class="s" x="815" y="454" text-anchor="middle">and gets a page from a tab,</text>
+        <text class="s" x="815" y="472" text-anchor="middle">checked by the server</text>
+        <rect class="box" x="700" y="70" width="230" height="90" rx="16"/>
+        <text class="t" x="815" y="102" text-anchor="middle">Container registry</text>
+        <text class="s" x="815" y="124" text-anchor="middle">quay.io, ghcr.io: images,</text>
+        <text class="s" x="815" y="142" text-anchor="middle">pulled once and checked</text>
+
+        <!-- WebSocket sessions -->
+        <path class="ws" d="M280 160 C 315 170, 325 220, 330 240" marker-end="url(#a-ws)" marker-start="url(#a-ws)"/>
+        <path class="ws" d="M280 410 C 315 400, 325 360, 330 330" marker-end="url(#a-ws)" marker-start="url(#a-ws)"/>
+
+        <!-- Peer to peer -->
+        <path class="p2p" d="M110 240 L110 330" marker-end="url(#a-p2p)" marker-start="url(#a-p2p)"/>
+        <text class="lbl" x="122" y="275" fill="var(--ok)">WebRTC, tab to tab:</text>
+        <text class="lbl" x="122" y="293" fill="var(--ok)">Pod traffic, image layers</text>
+
+        <!-- STUN: around the server, into its STUN box -->
+        <path class="ws" d="M280 72 C 520 40, 690 120, 660 260 C 650 300, 640 318, 612 318" stroke-dasharray="2 5" marker-end="url(#a-ws)"/>
+        <text class="lbl" x="470" y="56" fill="var(--accent)" text-anchor="middle">STUN: "what is my public address?"</text>
+
+        <!-- Registry -->
+        <path class="reg" d="M700 125 C 650 140, 612 150, 600 170" marker-end="url(#a-reg)"/>
+
+        <!-- Web visitor, in from below to the Gateway -->
+        <path class="web" d="M700 445 C 560 470, 430 440, 412 342" marker-end="url(#a-web)"/>
+        <text class="lbl" x="560" y="478" fill="var(--warn)">HTTPS</text>
+      </svg>
+      <div class="legend">
+        <span><i style="border-color: var(--accent)"></i>A tab's WebSocket to the server (joining, and Pod traffic that can't go direct); dotted: STUN</span>
+        <span><i style="border-color: var(--ok); border-top-style: dashed"></i>Directly between tabs</span>
+        <span><i style="border-color: var(--warn)"></i>A web visitor, served by a tab</span>
+      </div>
+      <figcaption>Every Pod has a real cluster address. Its packets leave the VM, pass through the tab's own switch,
+        and go straight to another tab or up the WebSocket to the server.</figcaption>
+    </figure>
+  </section>
+
+  <section id="p2p">
+    <h2>Peer to peer</h2>
+    <p>The server introduces tabs to each other, and from then on they talk directly where they can:
+      in this demo, every tab may connect to every other.</p>
+    <div class="grid2">
+      <div class="card"><h3>Getting through home routers</h3><p>A tab behind a home router doesn't know its own public
+        address. It asks the server's STUN responder, which answers with the address the request came from. Two tabs
+        swap those addresses through the server and send to each other at the same moment, so each router lets the
+        other's packets in.</p></div>
+      <div class="card"><h3>Pod traffic</h3><p>When a Pod in your tab talks to a Pod in another tab, its packets ride a
+        WebRTC data channel straight there, encrypted. Services work the same way: your tab picks a backend and
+        rewrites the address, as a node's kernel would.</p></div>
+      <div class="card"><h3>Image layers, shared like torrents</h3><p>Each layer of a container image is a torrent in
+        the same BitTorrent protocol gr8s's own nodes use. A tab fetches pieces from other tabs, rarest first, checks
+        each one against its digest, and passes on what it has. The server seeds every piece too, so a layer always
+        arrives.</p></div>
+      <div class="card"><h3>When direct fails</h3><p>Some networks, mobile ones especially, won't let two tabs connect.
+        Then traffic simply goes through the server, as it did before the tabs met. Nothing breaks; it takes the long
+        way.</p></div>
+    </div>
+  </section>
+
+  <section id="checked">
+    <h2>Checked content</h2>
+    <p>Whoever runs a tab controls it, and could make its Pod serve anything. So the page at
+      <a href="https://tabs.demo.gr8s.io/">tabs.demo.gr8s.io</a> isn't passed on blindly. The server pulled the
+      image itself and knows every file in it. For each request it asks one tab's Pod, and passes the answer on only
+      when it is that file, byte for byte. A tab that answers anything else is refused, and its node is tainted so
+      its Pods leave.</p>
+    <p>The page then says which tab served it, which browser, and how long it has been up: facts the server
+      fills in after the check, not the tab.</p>
+  </section>
+
+  <section id="safety">
+    <h2>Safety and privacy</h2>
+    <ul class="points">
+      <li><b>Your machine stays yours.</b> Pods run in VMs inside your browser's sandbox, with no access to your
+        files or other tabs. Close the tab and they are gone.</li>
+      <li><b>Pods can't reach the internet.</b> In this demo they reach only each other and cluster DNS, so a tab
+        is no relay for anyone.</li>
+      <li><b>Tabs get no secrets.</b> Browser nodes refuse Pods that bring Kubernetes Secrets, host paths or
+        privileges. Private images are pulled by the server; their credentials never reach a tab.</li>
+      <li><b>Other tabs see your public address.</b> Tabs that connect directly learn each other's public IP
+        address, as any WebRTC call does. The join page says so.</li>
+      <li><b>Tab owners don't see web visitors' addresses.</b> Your tab's Pod logs which browser asked for a page,
+        but not who: the server doesn't forward visitors' IP addresses to tabs.</li>
+      <li><b>It's a demo.</b> At most 64 tabs at once, and 4 from one address. It may be restarted at any time;
+        tabs rejoin by themselves.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Try it</h2>
+    <p>Open <a href="https://join.demo.gr8s.io/">join.demo.gr8s.io</a> in a tab and leave it open. Under each Pod,
+      “Logs and console” shows what it prints and its Linux VM booting, read from your tab. Then open
+      <a href="https://tabs.demo.gr8s.io/">tabs.demo.gr8s.io</a> in another tab and reload: the page names the tab
+      that served it, sometimes yours.</p>
+    <p>To run browser nodes on your own cluster, see
+      <a href="https://github.com/atgreen/gr8s/blob/main/docs/browser-nodes.md">running browser nodes</a> and the
+      <a href="https://github.com/atgreen/gr8s/blob/main/docs/design-browser-nodes.md">design</a>.</p>
+  </section>
+
+  <footer>gr8s is a Kubernetes-compatible cluster in one executable. This page is served by the demo's own server,
+    not by a tab.</footer>
+</main>
+</body>
+</html>
