@@ -651,8 +651,19 @@ ask it for RUNTIME's statistics, timing the answer."
 (defparameter +browser-node-runtime-js+ #.(dashboard-agent-asset-text "browser-node-runtime.mjs")
   "The browser's half of a browser node, served to the join page and used by tests under Node.")
 
-(defparameter +browser-node-html+ #.(dashboard-agent-asset-text "browser-node.html")
-  "The join page.")
+(defparameter +browser-node-runtime-version+
+  (subseq (ironclad:byte-array-to-hex-string
+           (ironclad:digest-sequence :sha256 (sb-ext:string-to-octets +browser-node-runtime-js+ :external-format :utf-8)))
+          0 16)
+  "The runtime's content hash. The join page loads it at a URL naming this, so a browser
+never runs a cached runtime from before an upgrade, and a tab that somehow does learns so
+when it joins.")
+
+(defparameter +browser-node-html+
+  (let ((page #.(dashboard-agent-asset-text "browser-node.html")))
+    (cl-ppcre:regex-replace "\\./browser-node-runtime\\.mjs\"" page
+                            (format nil "./browser-node-runtime.mjs?v=~A\"" +browser-node-runtime-version+)))
+  "The join page, loading this build's runtime.")
 
 (defparameter +browser-node-taint+
   '("key" "gr8s.io/browser" "value" "true" "effect" "NoSchedule")
@@ -853,7 +864,8 @@ stops with the session."
                                                            (virtual-node-host-store host))))))
                    (browser-session-send session (core-object "op" "welcome" "node" name
                                                               "epoch" (browser-session-epoch session)
-                                                              "podProxy" (and (browser-join-pod-proxy acceptor) t)))
+                                                              "podProxy" (and (browser-join-pod-proxy acceptor) t)
+                                                              "runtime" +browser-node-runtime-version+))
                    (format t "gr8s browser node ~A joined~%" name)
                    (incf (browser-join-joins acceptor))
                    (setf (browser-runtime-peer-handler runtime)
@@ -900,7 +912,9 @@ stops with the session."
            (accept-browser-node acceptor request)
            "")
           ((equal path "/")
-           (setf (hunchentoot:content-type*) "text/html; charset=utf-8")
+           ;; Never cached: after an upgrade, a reload must get the new page and runtime.
+           (setf (hunchentoot:content-type*) "text/html; charset=utf-8"
+                 (hunchentoot:header-out :cache-control) "no-store")
            +browser-node-html+)
           ((and (uiop:string-prefix-p "/blobs/" path) (browser-join-images acceptor))
            (let ((file (handler-case (browser-image-layer-file (browser-join-images acceptor) (subseq path 7))
@@ -925,7 +939,8 @@ stops with the session."
                  (progn (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+)
                         "{}"))))
           ((equal path "/browser-node-runtime.mjs")
-           (setf (hunchentoot:content-type*) "text/javascript; charset=utf-8")
+           (setf (hunchentoot:content-type*) "text/javascript; charset=utf-8"
+                 (hunchentoot:header-out :cache-control) "no-store")
            +browser-node-runtime-js+)
           ((and (equal path "/distro.erofs") (browser-join-distro acceptor))
            ;; Read with range requests; hunchentoot answers those.

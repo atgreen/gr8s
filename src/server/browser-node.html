@@ -290,6 +290,34 @@
     $("labels").innerHTML = [...taints, ...labels].join("");
   }
 
+  // When the cluster goes away without this tab leaving, as when its server restarts for
+  // an upgrade, wait for the server to answer again, then reload: the page and runtime
+  // are never cached, so the tab rejoins on whatever the server now runs. Waiting first
+  // matters: a reload while the server is down would leave the browser's error page,
+  // with nothing left to try again.
+  let leaving = false;
+  async function rejoinWhenBack() {
+    setState("joining", "Lost the cluster: rejoining…");
+    log("lost the cluster; rejoining when its server answers");
+    $("leave").textContent = "Stop rejoining";
+    $("leave").onclick = () => { leaving = true; gone(); };
+    for (let wait = 2000; !leaving; wait = Math.min(wait * 2, 60000)) {
+      // Spread out, so a restart doesn't bring every tab back in the same instant.
+      await new Promise((resolve) => setTimeout(resolve, wait * (0.5 + Math.random())));
+      if (leaving) return;
+      try {
+        if ((await fetch(location.href, { cache: "no-store" })).ok) { location.reload(); return; }
+      } catch {}
+    }
+  }
+
+  function gone() {
+    setState("gone", "Disconnected");
+    log("left the cluster; reload to join again");
+    $("leave").textContent = "Join again";
+    $("leave").onclick = () => location.reload();
+  }
+
   async function join() {
     setState("joining", "Joining the cluster…");
     log("loading the Linux kernel for this tab");
@@ -304,18 +332,22 @@
       memoryMiB: 256,
       log,
       onInfo: render,
+      // The server runs a newer runtime than this page loaded: load it.
+      onOutdated: () => { log("the cluster runs a newer version of this page; reloading"); leaving = true; location.reload(); },
     });
-    $("leave").onclick = () => node.close();
+    $("leave").onclick = () => { leaving = true; node.close(); };
     const name = await node.node;
     $("node").textContent = name;
     log(`this tab is node ${name}`);
     await node.closed;
-    setState("gone", "Disconnected");
-    log("left the cluster; reload to join again");
-    $("leave").textContent = "Join again";
-    $("leave").onclick = () => location.reload();
+    if (leaving) gone(); else await rejoinWhenBack();
   }
-  join().catch((error) => { setState("gone", "Couldn't join"); log(String(error?.message ?? error)); });
+  join().catch((error) => {
+    log(String(error?.message ?? error));
+    // Joined nothing, but the cluster may only be restarting: try again unless it refused.
+    if (tab && error?.refused === false && !leaving) rejoinWhenBack();
+    else setState("gone", "Couldn't join");
+  });
 </script>
 </body>
 </html>

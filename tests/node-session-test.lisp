@@ -1765,6 +1765,8 @@ them. A node can't claim another's address or name."
                     (name (gethash "node" welcome)))
                (is (equal "welcome" (gethash "op" welcome)))
                (is (eql 1 (gethash "epoch" welcome)))
+               ;; It names the runtime the server serves, so a tab on an older one reloads.
+               (is (equal gr8s.server::+browser-node-runtime-version+ (gethash "runtime" welcome)))
                (is-true (wait-until (lambda () (handler-case (gr8s.model::node-record-ready-p (gr8s.controllers::get-node store name))
                                                  (gr8s.model::kubernetes-error () nil)))
                                     :timeout 20))
@@ -2200,6 +2202,36 @@ them. A node can't claim another's address or name."
           ;; The reply comes from the ClusterIP; other traffic is untouched.
           (is (equal '("10.96.0.11" 80 "10.80.32.3" 40001 t t) (funcall describe (gethash "reply" result))))
           (is (equal '("10.80.16.2" 8080 "10.80.32.3" 50000 t t) (funcall describe (gethash "other" result))))))))
+
+(test browser-tabs-always-load-the-runtime-the-server-runs
+  ;; After an upgrade, a reloaded tab must run the new runtime (podster-w22b): the page
+  ;; is never cached and loads the runtime at a URL naming its content hash.
+  (with-temporary-store (store path)
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0 :pki pki))
+           (host (gr8s.server::make-virtual-node-host store server pki (merge-pathnames "virtual/" path)))
+           (listener (gr8s.server::start-browser-join-listener host "127.0.0.1" 0))
+           (base (format nil "http://127.0.0.1:~D/" (hunchentoot:acceptor-port listener)))
+           (version gr8s.server::+browser-node-runtime-version+))
+      (unwind-protect
+           (progn
+             (is (= 16 (length version)))
+             (is (equal (subseq (ironclad:byte-array-to-hex-string
+                                 (ironclad:digest-sequence :sha256 (sb-ext:string-to-octets gr8s.server::+browser-node-runtime-js+
+                                                                                            :external-format :utf-8)))
+                                0 16)
+                        version))
+             (multiple-value-bind (page status headers) (drakma:http-request base)
+               (is (= 200 status))
+               (is (equal "no-store" (cdr (assoc :cache-control headers))))
+               (is-true (search (format nil "from \"./browser-node-runtime.mjs?v=~A\"" version) page))
+               (is (null (search "from \"./browser-node-runtime.mjs\"" page))))
+             (multiple-value-bind (body status headers) (drakma:http-request (format nil "~Abrowser-node-runtime.mjs?v=~A" base version))
+               (is (= 200 status))
+               (is (equal "no-store" (cdr (assoc :cache-control headers))))
+               (is-true (search "export function joinCluster" (if (stringp body) body (sb-ext:octets-to-string body :external-format :utf-8))))))
+        (hunchentoot:stop listener)
+        (gr8s.apiserver::stop-node-grpc-server server)))))
 
 (test browser-stun-names-the-address-a-request-came-from
   ;; RFC 5769's sample: 192.0.2.1 port 32853 is XOR-MAPPED-ADDRESS port a147, address e112a643.
