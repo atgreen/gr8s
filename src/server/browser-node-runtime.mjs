@@ -383,6 +383,27 @@ function describeBrowser() {
   return { name, os };
 }
 
+// When to try a direct link to a peer again (podster-99q4). Two tabs that can't reach
+// each other (a symmetric NAT, say, with no TURN) still talk through the server, but
+// each attempt costs signalling and ICE checks, and a layer fetch waits for it; so a
+// peer whose link failed isn't tried again for a while, twice as long each time it
+// fails again, until a link to it opens or it leaves.
+export function linkBackoff({ first = 10000, most = 600000, now = () => Date.now() } = {}) {
+  const failures = new Map(); // node -> { wait, until }
+  return {
+    allows: (node) => !(now() < (failures.get(node)?.until ?? 0)),
+    failed(node) {
+      const wait = Math.min(most, failures.has(node) ? failures.get(node).wait * 2 : first);
+      failures.set(node, { wait, until: now() + wait });
+    },
+    succeeded: (node) => failures.delete(node),
+    // Forget peers that left: one that comes back starts afresh.
+    retain(nodes) {
+      for (const node of failures.keys()) if (!nodes.includes(node)) failures.delete(node);
+    },
+  };
+}
+
 export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 256, capacity, log = () => {}, onInfo = () => {} }) {
   const pods = new Map(); // uid -> Pod
   const execs = new Map(); // exec id -> { process, pty }
@@ -640,6 +661,7 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     const links = new Map(); // node -> { pc, pods, layers, ready, waiters }
     const flows = new Map(); // "proto src sport dst dport" -> time
     const asked = new Map(); // node -> when this tab last asked it to connect
+    const backoff = linkBackoff();
     const FLOW_IDLE = 300000;
     const toNumber = (address) => address.split(".").reduce((n, part) => n * 256 + Number(part), 0);
     const inCidr = (cidr, address) => {
@@ -708,12 +730,18 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       };
       l.pc.onconnectionstatechange = () => {
         if (["failed", "closed"].includes(l.pc.connectionState)) { links.delete(node); l.ready = false; }
+        if (l.pc.connectionState === "failed") backoff.failed(node);
       };
       const adopt = (channel) => {
         channel.binaryType = "arraybuffer";
         if (channel.label === "pods") {
           l.pods = channel;
-          channel.onopen = () => { l.ready = true; log(`direct link to ${node}`); l.waiters.splice(0).forEach((w) => w()); };
+          channel.onopen = () => {
+            l.ready = true;
+            backoff.succeeded(node);
+            log(`direct link to ${node}`);
+            l.waiters.splice(0).forEach((w) => w());
+          };
           channel.onmessage = (event) => receivePacket(node, event.data);
           if (channel.readyState === "open") channel.onopen();
         } else if (channel.label.startsWith("bt:")) {
@@ -733,9 +761,9 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     }
 
     function connect(node) {
-      if (!available || links.has(node) || !self) return;
+      if (!available || links.has(node) || !self || !backoff.allows(node)) return;
       // The lower name offers, so two tabs never offer to each other at once.
-      if (self < node) offer(node).catch(() => links.delete(node));
+      if (self < node) offer(node).catch(() => { links.delete(node); backoff.failed(node); });
       else if (!(Date.now() - (asked.get(node) ?? 0) < 10000)) {
         asked.set(node, Date.now());
         send({ op: "signal", to: node, data: { want: true } });
@@ -746,6 +774,7 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       update(info) {
         self = info.node?.name ?? self;
         peers = info.peers ?? [];
+        backoff.retain(peers.map((peer) => peer.node));
         iceServers = [...(info.iceServers ?? [])];
         // The server's own STUN responder, at the address this page came from.
         const host = globalThis.location?.hostname;
@@ -770,7 +799,12 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       },
       async signal(from, data) {
         if (!available || !data) return;
-        if (data.want) { if (self < from && !links.has(from)) offer(from).catch(() => links.delete(from)); return; }
+        if (data.want) {
+          if (self < from && !links.has(from) && backoff.allows(from)) {
+            offer(from).catch(() => { links.delete(from); backoff.failed(from); });
+          }
+          return;
+        }
         const l = link(from);
         if (data.sdp) {
           await l.pc.setRemoteDescription(data.sdp);

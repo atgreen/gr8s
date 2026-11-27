@@ -2120,6 +2120,27 @@ them. A node can't claim another's address or name."
                 (is (equal (map 'list hex (cl-torrent::torrent-file-piece-hashes (cl-torrent:blob-torrent-file torrent)))
                            (coerce (gethash "pieces" result) 'list))))))))))
 
+(test browser-tabs-back-off-peers-they-cannot-reach
+  ;; A tab tries a direct link to a peer whose link failed again only after a wait that
+  ;; doubles with each failure up to a cap, and starts afresh once a link opens or the
+  ;; peer leaves (podster-99q4). The script waits 10, 20, then 40 (the cap).
+  (let ((output (ignore-errors
+                 (uiop:run-program (list "node" (namestring (asdf:system-relative-pathname
+                                                             "gr8s" "tests/browser-node/backoff-check.mjs")))
+                                   :output :string :error-output nil))))
+    (if (null output)
+        (skip "node is not available to run the tab's backoff")
+        (let ((result (com.inuoe.jzon:parse output)))
+          (is (equal '(("fresh" t) ("failed once" nil) ("9 later" nil) ("10 later" t)
+                       ("failed twice" nil) ("19 later" nil) ("20 later" t)
+                       ("failed thrice" nil) ("failed four times" nil) ("failed five times" nil)
+                       ("39 later" nil) ("40 later" t) ("failed after a cap" nil)
+                       ("linked" t) ("failed after linking" nil) ("10 later" t)
+                       ("failed again" nil) ("left" t) ("failed after rejoining" nil) ("10 later" t))
+                     (map 'list (lambda (step) (list (aref step 0) (aref step 1))) (gethash "steps" result))))
+          ;; Other peers are unaffected.
+          (is (eq t (gethash "other" result)))))))
+
 (test browser-stun-names-the-address-a-request-came-from
   ;; RFC 5769's sample: 192.0.2.1 port 32853 is XOR-MAPPED-ADDRESS port a147, address e112a643.
   (let* ((request (concatenate '(vector (unsigned-byte 8))

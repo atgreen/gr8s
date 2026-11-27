@@ -247,7 +247,9 @@ podster-135e and podster-i8my) still help native nodes.
   public address: `serve --browser-stun-listen HOST:PORT` answers STUN binding requests
   itself (`src/server/browser-stun.lisp`), and tabs ask it at the page's own hostname.
   There is no TURN: a tab that can't reach a peer directly reaches it through its
-  session, where NetworkPolicy is enforced. Direct peers learn each other's public
+  session, where NetworkPolicy is enforced. A tab doesn't keep retrying a peer it can't reach:
+  after a failed link it waits 10 s before trying again, doubling each time up to 10
+  minutes, and starts afresh once a link opens or the peer leaves (podster-99q4). Direct peers learn each other's public
   address, so `--browser-peering` limits who connects directly: `same-network` (the
   default; tabs whose browsers come from one client address), `all`, or `none`.
 - **Layers between tabs** (podster-9mio). Tabs share layers with the agents' BitTorrent
