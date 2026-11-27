@@ -351,7 +351,8 @@ async function layerBytes(layer, base, log, swarm) {
   return bytes;
 }
 
-// How much of each container's output is kept for `kubectl logs`.
+// How much of each container's output is kept for `kubectl logs`, and of each Pod's
+// VM console for the page.
 const LOG_LIMIT = 1 << 20;
 
 function now() {
@@ -1130,13 +1131,21 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
   async function ensurePod(request) {
     let pod = pods.get(request.uid);
     if (pod) return pod;
-    pod = { request, vm: null, containers: new Map(), starting: null };
+    pod = { request, vm: null, containers: new Map(), starting: null, console: "" };
     pods.set(request.uid, pod);
     pod.starting = (async () => {
       log(`starting ${request.namespace}/${request.name}`);
       const network = request.network;
       if (network) pod.nic = makeNic();
       pod.vm = await createKernel({ distro, memoryMiB, ...(network ? { net: pod.nic.device } : {}) });
+      // The VM's console, from its boot on, for the page to show.
+      const consoleText = new TextDecoder();
+      pod.vm.output?.pipeTo(new WritableStream({
+        write: (chunk) => {
+          pod.console += consoleText.decode(chunk, { stream: true });
+          if (pod.console.length > LOG_LIMIT) pod.console = pod.console.slice(-LOG_LIMIT);
+        },
+      })).catch(() => {});
       if (network) {
         // The Pod's own address in the node's Pod CIDR, as the server assigned it.
         const setup = await pod.vm.exec("sh", ["-c",
@@ -1388,5 +1397,16 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     node,
     closed,
     close: () => socket.close(),
+    // What a Pod here wrote, for the page to show: its containers' logs and its VM's
+    // console, read from this tab, with nothing sent to the server. Null when the Pod
+    // isn't here.
+    output(namespace, name) {
+      const pod = [...pods.values()].find((p) => p.request.namespace === namespace && p.request.name === name);
+      if (!pod) return null;
+      return {
+        containers: [...pod.containers].map(([container, { log }]) => ({ name: container, log })),
+        console: pod.console,
+      };
+    },
   };
 }

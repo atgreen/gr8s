@@ -9,6 +9,9 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- The browser node join page shows each Pod's container logs and its VM's boot console
+  in a drop-down under the Pod, read from the tab itself with no traffic to the server
+  (podster-y81l).
 - A cert-manager `acme` issuer (podster-23v9.4): an Issuer or ClusterIssuer with
   `spec.acme` gets publicly trusted certificates from Let's Encrypt, or any RFC 8555
   server, validated over HTTP-01 through `http01.gatewayHTTPRoute` solvers. The
