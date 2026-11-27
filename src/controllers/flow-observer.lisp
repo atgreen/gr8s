@@ -144,8 +144,10 @@ keep the stream open, so its reader would otherwise never see that node again."
     (flet ((deliver (object)
              (bt:with-lock-held (lock)
                ;; Pods and policies change while a follower watches; look again now and then.
+               ;; While a checkpoint blocks the store, the last look serves (podster-0hp0).
                (when (> (- (get-internal-real-time) context-time) (* 5 internal-time-units-per-second))
-                 (setf context (make-flow-context store) context-time (get-internal-real-time)))
+                 (setf context (or (ignore-errors (make-flow-context store)) context)
+                       context-time (get-internal-real-time)))
                (funcall function (if (gethash "error" object) object (enrich-flow context object))))))
       (let ((threads
               (loop for name in names
@@ -173,7 +175,10 @@ keep the stream open, so its reader would otherwise never see that node again."
                                          (error (condition)
                                            (unless failing
                                              (setf failing t)
-                                             (deliver (core-object "node" name "error" (princ-to-string condition))))))
+                                             ;; Outside the handler above: an error here would end
+                                             ;; the thread, and with it the server.
+                                             (ignore-errors
+                                              (deliver (core-object "node" name "error" (princ-to-string condition)))))))
                                        (when session
                                          (ignore-errors (runtime-cancel-exec-session runtime session "observer finished"))
                                          (ignore-errors (runtime-release-exec-session runtime session))))

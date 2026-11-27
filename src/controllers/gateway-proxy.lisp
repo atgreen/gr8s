@@ -373,8 +373,9 @@ Named, as OTel's HTTP conventions ask, by the method and the route that matched.
   "The client socket of the connection the current Gateway request arrived on.")
 
 (defparameter +gateway-upgrade-idle-timeout-seconds+ (* 60 60)
-  "How long an upgraded connection's client may stay quiet. A live view that only
-   receives sends nothing upstream, and Hunchentoot's own read timeout is 20s.")
+  "How long either end of an upgraded connection may stay quiet. A live view that only
+   receives sends nothing upstream, Hunchentoot's own read timeout is 20s, and the
+   backend's socket would otherwise keep its 10s connect timeout for reads.")
 
 (defmethod hunchentoot:process-connection :around ((acceptor gateway-acceptor) socket)
   (let ((*gateway-connection-socket* socket))
@@ -420,10 +421,13 @@ Named, as OTel's HTTP conventions ask, by the method and the route that matched.
                                           :filter #'gateway-upgrade-response-headers)
                (let ((client (hunchentoot::start-output 101 nil)))
                  (finish-output client)
-                 (when *gateway-connection-socket*
-                   (ignore-errors
-                    (setf (sb-impl::fd-stream-timeout (usocket:socket-stream *gateway-connection-socket*))
-                          (coerce +gateway-upgrade-idle-timeout-seconds+ 'single-float))))
+                 ;; Both ends may stay quiet as long: the backend's socket was opened with
+                 ;; a connect timeout that SBCL also applies to its reads.
+                 (dolist (end (list *gateway-connection-socket* socket))
+                   (when (typep end 'usocket:stream-usocket)
+                     (ignore-errors
+                      (setf (sb-impl::fd-stream-timeout (usocket:socket-stream end))
+                            (coerce +gateway-upgrade-idle-timeout-seconds+ 'single-float)))))
                  (relay-runtime-stream client stream socket)))
               (t
                (unwind-protect

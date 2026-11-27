@@ -1219,3 +1219,34 @@ process count against the kernel ceiling; and the heartbeat carries all three."
              (is (eql pressure (slot-value (gr8s.agent::agent-heartbeat nil)
                                             'gr8s.node.v1::disk-pressure)))))
       (setf (symbol-function 'gr8s.kubelet::filesystem-statistics) original))))
+
+(test resource-metrics-collection-survives-a-checkpoint
+  ;; The leader and followers block store access for a moment at each checkpoint. A
+  ;; metrics collection that runs into it keeps the previous one; unhandled, its error
+  ;; ended the thread, and in a server with the debugger disabled, the server
+  ;; (podster-0hp0).
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((server (gr8s.apiserver::%make-node-grpc-server :store store))
+           (runtime (gr8s.controllers::make-control-plane-runtime store server))
+           (escaped nil)
+           (hook sb-ext:*invoke-debugger-hook*))
+      ;; Threads see the global hook: record an error that escapes one, and end the thread.
+      (setf sb-ext:*invoke-debugger-hook*
+            (lambda (condition previous)
+              (declare (ignore previous))
+              (setf escaped condition)
+              (sb-thread:abort-thread)))
+      (unwind-protect
+           (progn
+             (gr8s.store::quiesce-store-access store :timeout 5)
+             (unwind-protect
+                  (progn
+                    (gr8s.controllers::refresh-control-plane-resource-metrics runtime)
+                    (is-true (wait-until (lambda () (not (gr8s.controllers::control-plane-runtime-resource-metrics-refreshing runtime)))
+                                         :timeout 10)))
+               (gr8s.store::resume-store-access store))
+             (is (null escaped) "the collection's error escaped its thread: ~A" escaped)
+             ;; Nothing was collected, so a later reader asks again.
+             (is (zerop (gr8s.controllers::control-plane-runtime-resource-metrics-at runtime))))
+        (setf sb-ext:*invoke-debugger-hook* hook)))))

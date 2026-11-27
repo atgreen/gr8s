@@ -534,14 +534,20 @@ A reader that stops waiting is served the previous collection."
         (bt:make-thread
          (lambda ()
            (unwind-protect
-                (multiple-value-bind (summaries metrics)
-                    (collect-control-plane-resource-metrics runtime)
-                  (bt:with-lock-held (lock)
-                    (setf (control-plane-runtime-resource-metrics-summaries runtime) summaries
-                          (control-plane-runtime-container-metrics runtime) metrics
-                          ;; Stamped on completion: a collection slowed by a silent
-                          ;; node must not be stale the moment it lands.
-                          (control-plane-runtime-resource-metrics-at runtime) (get-universal-time))))
+                ;; A collection that fails, as while a checkpoint blocks the store,
+                ;; leaves the previous one in place; the next reader asks again.
+                ;; Unhandled, its error would end the server (podster-0hp0).
+                (handler-case
+                    (multiple-value-bind (summaries metrics)
+                        (collect-control-plane-resource-metrics runtime)
+                      (bt:with-lock-held (lock)
+                        (setf (control-plane-runtime-resource-metrics-summaries runtime) summaries
+                              (control-plane-runtime-container-metrics runtime) metrics
+                              ;; Stamped on completion: a collection slowed by a silent
+                              ;; node must not be stale the moment it lands.
+                              (control-plane-runtime-resource-metrics-at runtime) (get-universal-time))))
+                  (error (condition)
+                    (format *error-output* "~&gr8s resource metrics: ~A~%" condition)))
              (bt:with-lock-held (lock)
                (setf (control-plane-runtime-resource-metrics-refreshing runtime) nil)
                (sb-thread:condition-broadcast

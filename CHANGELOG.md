@@ -260,6 +260,17 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- A control-plane member no longer exits when a checkpoint briefly blocks its store
+  (podster-0hp0). The flow observer and the resource-metrics collector let the
+  momentary "Application restore is blocking store access" error escape their
+  threads, which ends the server: a lab follower exited five times in three days.
+  Each now keeps its previous result and tries again.
+- Browser tabs no longer drop when the leader checkpoints (podster-0hp0). A report that
+  couldn't be made while the store was blocked ended the tab's reporter for good, and
+  the Gateway, which cut an upgraded connection whose backend was quiet for 10 s (its
+  connect timeout, which SBCL also applies to reads), then closed the tab's session. A
+  tab now misses one report; upgraded connections may stay quiet for an hour at either
+  end; and a browser's statistics are waited for 5 s, not 120.
 - Pods on browser nodes reach Services by ClusterIP (podster-kw5u). Connections to
   one timed out: nothing translated the address for a Pod in a tab, and the server
   judged egress policy against the ClusterIP. The tab now translates, asking the
