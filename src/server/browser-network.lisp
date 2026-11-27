@@ -134,7 +134,7 @@ or NIL when this process may not create devices (no CAP_NET_ADMIN), after saying
                            while (and count (browser-network-fd network))
                            do (let ((frame (subseq buffer 0 count))
                                     (policy (browser-network-policy network)))
-                                (if (or (null policy) (browser-policy-admit-p policy network frame :ingress))
+                                (if (browser-frame-admit-p policy network frame :ingress)
                                     (progn (incf (browser-network-frames-in network))
                                            (ignore-errors (funcall send-frame frame)))
                                     (incf (browser-network-dropped-in network)))))))
@@ -152,7 +152,7 @@ or NIL when this process may not create devices (no CAP_NET_ADMIN), after saying
   (let ((fd (browser-network-fd network))
         (policy (browser-network-policy network)))
     (when fd
-      (if (or (null policy) (browser-policy-admit-p policy network frame :egress))
+      (if (browser-frame-admit-p policy network frame :egress)
           (progn (incf (browser-network-frames-out network))
                  (write-tap-frame fd frame))
           (incf (browser-network-dropped-out network))))))
@@ -226,8 +226,10 @@ PROTOCOL (a number) and PORT (NIL for a protocol without ports)."
 
 (defun ipv4-frame-flow (frame)
   "FRAME's IPv4 flow as (values protocol source source-port destination destination-port),
-or NIL when it isn't IPv4. Ports are NIL for protocols without them."
-  (when (and (>= (length frame) 34) (= (aref frame 12) #x08) (= (aref frame 13) #x00))
+or NIL when it isn't a well-formed IPv4 frame. Ports are NIL for protocols without them."
+  (when (and (>= (length frame) 34) (= (aref frame 12) #x08) (= (aref frame 13) #x00)
+             (= (ash (aref frame 14) -4) 4) (>= (logand (aref frame 14) #x0f) 5)
+             (>= (length frame) (+ 14 (* 4 (logand (aref frame 14) #x0f)))))
     (let* ((header (* 4 (logand (aref frame 14) #x0f)))
            (protocol (aref frame 23))
            (l4 (+ 14 header))
@@ -239,21 +241,46 @@ or NIL when it isn't IPv4. Ports are NIL for protocols without them."
         (values protocol (address 26) (and ports-p (port l4))
                 (address 30) (and ports-p (port (+ l4 2))))))))
 
-(defun browser-policy-admit-p (policy network frame direction)
+(defun browser-pod-address-p (network address)
+  "Whether ADDRESS is one of NETWORK's Pods'."
+  (bt:with-lock-held ((browser-network-lock network))
+    (loop for pod being the hash-values of (browser-network-addresses network)
+          thereis (equal pod address))))
+
+(defun arp-frame-admit-p (network frame direction)
+  "Whether FRAME is ARP for IPv4 over Ethernet that may pass in DIRECTION: from the
+browser, only when its sender address is one of its Pods' (or 0.0.0.0, a probe), so a tab
+can't claim the gateway or another node's addresses."
+  (and (>= (length frame) 42)
+       (= (aref frame 12) #x08) (= (aref frame 13) #x06)
+       (= (aref frame 14) 0) (= (aref frame 15) 1)          ; Ethernet
+       (= (aref frame 16) #x08) (= (aref frame 17) #x00)    ; IPv4
+       (= (aref frame 18) 6) (= (aref frame 19) 4)
+       (= (aref frame 20) 0) (member (aref frame 21) '(1 2)) ; request or reply
+       (or (eq direction :ingress)
+           (let ((sender (format nil "~D.~D.~D.~D" (aref frame 28) (aref frame 29) (aref frame 30) (aref frame 31))))
+             (or (string= sender "0.0.0.0") (browser-pod-address-p network sender))))))
+
+(defun browser-frame-admit-p (policy network frame direction)
   "Whether FRAME may pass in DIRECTION: :egress from the browser's Pods, :ingress to them.
-Frames that aren't IPv4, such as ARP, pass; an IPv4 frame from the browser must come from
-one of its Pods' addresses."
+Only IPv4 and ARP pass at all (podster-vlnv): IPv6 and every other kind are dropped, as
+nothing checks them. IPv4 must be well formed and, from the browser, come from one of its
+Pods' addresses, and with POLICY keep to the Pods' NetworkPolicy; ARP must be well formed
+and, from the browser, speak only for its Pods."
+  (cond ((ipv4-frame-flow frame)
+         (and (or (eq direction :ingress)
+                  (browser-pod-address-p network (nth-value 1 (ipv4-frame-flow frame))))
+              (or (null policy) (browser-policy-admit-p policy network frame direction))))
+        (t (arp-frame-admit-p network frame direction))))
+
+(defun browser-policy-admit-p (policy network frame direction)
+  "Whether FRAME, a well-formed IPv4 frame (browser-frame-admit-p checks that and its
+source), keeps to the NetworkPolicy of the browser's Pods in DIRECTION."
   (multiple-value-bind (protocol source source-port destination destination-port) (ipv4-frame-flow frame)
-    (unless protocol (return-from browser-policy-admit-p t))
     (let ((now (get-universal-time))
           (pod-address (if (eq direction :egress) source destination))
           (peer (if (eq direction :egress) destination source))
           (port destination-port))
-      (when (and (eq direction :egress)
-                 (not (bt:with-lock-held ((browser-network-lock network))
-                        (loop for address being the hash-values of (browser-network-addresses network)
-                              thereis (equal address source)))))
-        (return-from browser-policy-admit-p nil))
       (bt:with-lock-held ((browser-policy-lock policy))
         (let ((flows (browser-policy-flows policy))
               (reverse (list protocol destination destination-port source source-port))
