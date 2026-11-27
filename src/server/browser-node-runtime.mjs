@@ -559,7 +559,14 @@ export function serviceTranslation(ask) {
   };
 }
 
-export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 256, capacity, log = () => {}, onInfo = () => {} }) {
+// This runtime's version, as the join page names it in the URL it loads it from (null
+// when loaded some other way, as under Node).
+const runtimeVersion = (() => {
+  try { return new URL(import.meta.url).searchParams.get("v"); } catch { return null; }
+})();
+
+export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 256, capacity, log = () => {}, onInfo = () => {},
+                              onOutdated = () => {} }) {
   const pods = new Map(); // uid -> Pod
   const execs = new Map(); // exec id -> { process, pty }
   const socket = new WebSocket(url);
@@ -1039,7 +1046,8 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
   };
   socket.onclose = async () => {
     for (const uid of [...pods.keys()]) await deletePod(uid);
-    rejectNode(new Error(refusal ?? "the cluster closed the connection"));
+    // Refused (the cluster is full, say) is final; closed before joining isn't.
+    rejectNode(Object.assign(new Error(refusal ?? "the cluster closed the connection"), { refused: refusal !== null }));
     resolveClosed();
   };
   socket.onmessage = async (event) => {
@@ -1078,6 +1086,9 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       return;
     }
     if (message.op === "welcome") {
+      // A server with another runtime than this one, as after an upgrade: the page
+      // should load the new one.
+      if (runtimeVersion && message.runtime && message.runtime !== runtimeVersion) onOutdated(message.runtime);
       epoch = message.epoch ?? null;
       log(`joined as ${message.node}`);
       resolveNode(message.node);

@@ -9,6 +9,9 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- Browser tabs rejoin on their own when their server restarts or is upgraded, and
+  always on the server's current page and runtime: the page is never cached and loads
+  the runtime at a URL naming its hash (podster-w22b).
 - The browser node join page shows each Pod's container logs and its VM's boot console
   in a drop-down under the Pod, read from the tab itself with no traffic to the server
   (podster-y81l).
