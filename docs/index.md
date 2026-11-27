@@ -11,6 +11,7 @@ Choose a path through the current guides:
 | Evaluate the evidence | [Conformance results](CONFORMANCE.md) | [Gateway conformance harness](../deploy/conformance/README.md), linked validation records in each feature guide |
 
 Feature references cover [gr8, the sandbox for agents and other commands](gr8.md),
+[browser nodes](browser-nodes.md),
 [networking](networking.md), [container runtimes](runtime.md),
 [storage](persistent-storage.md), [custom resources](custom-resources.md),
 [Secrets](configmap-secret-api.md), [resource management](resource-management.md),
@@ -38,6 +39,6 @@ standalone CNI and Gateway, validated by the
 [Gateway conformance harness](../deploy/conformance/README.md)),
 [ListenerSets](design-listenersets.md),
 [selector-scoped kernel tracing](design-gr8s-trace.md), and
-[browser nodes](design-browser-nodes.md) (proposed).
+[browser nodes](design-browser-nodes.md).
 The [Service identity envelope](service-wire-protocol.md) is an archived
 experiment, kept for the record.
