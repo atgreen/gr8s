@@ -1,0 +1,40 @@
+# The overview page's k9s (podster-lsoj): k9s-relay, plus what the page boots: unkernel,
+# and an Alpine image carrying the linux/arm64 k9s release.
+#   podman build --platform linux/amd64 -t ghcr.io/atgreen/gr8s-demo-k9s:2 examples/browser-demo/k9s
+ARG UNKERNEL=0.2.0-261126-fd204d3
+ARG K9S=v0.51.0
+
+FROM registry.fedoraproject.org/fedora:44 AS files
+ARG UNKERNEL
+ARG K9S
+RUN dnf -q -y install erofs-utils gzip && dnf clean all
+WORKDIR /build
+RUN curl -fsSLo unkernel.tgz https://registry.npmjs.org/unkernel/-/unkernel-${UNKERNEL}.tgz \
+ && echo "255c660dfc045353b4e7f99515dfc80740b0142a01f843f8c9f630ee4bd3a04276e421a390ec6a2aa3fa7765f27605ee605b81865a01370d26eb8bac00475806  unkernel.tgz" | sha512sum -c \
+ && curl -fsSLo alpine.erofs https://github.com/pithings/unkernel/releases/download/v${UNKERNEL}/alpine.erofs \
+ && echo "4253fdcaf3fe289f6a48eb565b5ca1eb43e147e6b9d9985ffbca865b3984a9a8  alpine.erofs" | sha256sum -c \
+ && curl -fsSLo k9s.tgz https://github.com/derailed/k9s/releases/download/${K9S}/k9s_Linux_arm64.tar.gz \
+ && echo "3ee05c82e5f9198928a4e86133608ba6a2c10a2244d6a7789e820f78319d640c  k9s.tgz" | sha256sum -c
+RUN mkdir -p /srv/k9s/unkernel/_chunks rootfs \
+ && tar -xzf unkernel.tgz \
+ && cp package/dist/web.mjs package/dist/unkernel.wasm /srv/k9s/unkernel/ \
+ && cp package/dist/_chunks/core.mjs package/dist/_chunks/vk-host.mjs package/dist/_chunks/vk-shader.mjs /srv/k9s/unkernel/_chunks/ \
+ && fsck.erofs --extract=rootfs --preserve alpine.erofs \
+ && tar -xzf k9s.tgz -C rootfs/usr/local/bin k9s \
+ && echo "192.0.2.10 kube" >> rootfs/etc/hosts
+COPY rootfs/ rootfs/
+RUN mkfs.erofs -L kwroot -zzstd -Efragments,dedupe -C131072 -T0 /srv/k9s/k9s.erofs rootfs \
+ && for f in unkernel/unkernel.wasm unkernel/web.mjs unkernel/_chunks/core.mjs; do gzip -9 -k /srv/k9s/$f; done
+COPY k9s.mjs /srv/k9s/
+
+FROM docker.io/library/golang:1.24 AS relay
+WORKDIR /src
+COPY relay/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags=-s -o /k9s-relay .
+
+FROM scratch
+COPY --from=relay /k9s-relay /k9s-relay
+COPY --from=files /srv /srv
+USER 65532
+EXPOSE 8080
+ENTRYPOINT ["/k9s-relay"]
