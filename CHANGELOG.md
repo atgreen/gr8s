@@ -16,14 +16,6 @@ the Kubernetes API version with a gr8s release suffix (see
   endpoints. Deleting such a Pod also works now: it failed with "Node … was not found",
   even with `--force --grace-period=0`, because the deletion tried to tell the absent
   Node to stop the Pod.
-### Added
-
-- Checked content tells the browser Pod about the visitor, as a reverse proxy would:
-  their `User-Agent`, `Referer` and `Accept-Language`, `X-Forwarded-Proto` and
-  `X-Forwarded-Host`, and their address as `X-Forwarded-For` and `X-Real-IP`. The Pod's
-  logs showed the gr8s server and drakma for every visitor (podster-6bss). A tab's
-  owner reads its Pod's logs, so `serve --browser-forward-client-address false` keeps
-  visitors' addresses from strangers' tabs.
 - A node's agent no longer rejects every desired-state snapshot while a browser node is
   hosted on one of its peers (podster-epec). The leader routes a browser node's Pod CIDR
   through the node hosting it, so that node's route carries two CIDRs, and the agent
@@ -32,6 +24,15 @@ the Kubernetes API version with a gr8s release suffix (see
   `metrics.k8s.io` and Headlamp showed nothing. Peers also had no route to the browser
   node's Pods. A route may now carry further CIDRs after the peer's own, each inside the
   cluster's Pod range and overlapping nothing else the node routes.
+
+### Added
+
+- Checked content tells the browser Pod about the visitor, as a reverse proxy would:
+  their `User-Agent`, `Referer` and `Accept-Language`, `X-Forwarded-Proto` and
+  `X-Forwarded-Host`, and their address as `X-Forwarded-For` and `X-Real-IP`. The Pod's
+  logs showed the gr8s server and drakma for every visitor (podster-6bss). A tab's
+  owner reads its Pod's logs, so `serve --browser-forward-client-address false` keeps
+  visitors' addresses from strangers' tabs.
 
 ## [v1.37.2-gr8s.9] — 2026-11-27
 
