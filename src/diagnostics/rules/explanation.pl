@@ -28,6 +28,10 @@ refines("restarts-liveness-kill", "restarts-crash").
 %% What a pull error names says more than that the pull failed.
 refines(Why, What) :- pull_explanation(Why, _, _), pull_symptom(What).
 refines("pod-unschedulable", "pod-PodScheduled-False").
+%% A Pod whose Node is gone is not ready, and nothing will make it so (podster-k988).
+refines(Why, What) :-
+    memberchk(Why, ["pod-node-gone", "pod-browser-node-gone"]),
+    memberchk(What, ["pod-Ready-False", "pod-Ready-Unknown", "pod-ContainersReady-False"]).
 refines("pod-unschedulable", "event-FailedScheduling").
 refines("openbao-uninitialized", "readiness-probe-failing").
 refines("openbao-sealed", "readiness-probe-failing").
