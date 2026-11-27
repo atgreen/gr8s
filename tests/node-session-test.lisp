@@ -1719,8 +1719,13 @@ them. A node can't claim another's address or name."
   (finish-output stream))
 
 (defun browser-node-test-read (stream)
-  (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
-    (and (= opcode 1) (com.inuoe.jzon:parse payload))))
+  "The next message the server sends, answering its pings on the way, as a browser does."
+  (loop
+    (multiple-value-bind (opcode payload) (gr8s.protocol::read-websocket-frame stream)
+      (if (eql opcode 9)
+          (progn (gr8s.protocol::write-websocket-frame stream 10 payload :masked-p t)
+                 (finish-output stream))
+          (return (and (eql opcode 1) (com.inuoe.jzon:parse payload)))))))
 
 (defun browser-node-test-join (stream &key (key (ironclad:generate-key-pair :secp256r1)) (tab "0a0b") wrong-key gpu)
   "Join as a browser would: hello with KEY's public half and TAB, and GPU (a description of
@@ -1896,12 +1901,106 @@ Returns the server's next message."
                (let ((again (browser-node-test-join (connect) :key key :tab "aa")))
                  (is (equal name (gethash "node" again)))
                  (is (eql 2 (gethash "epoch" again)))
+                 ;; Its node is running again for the new session.
+                 (is (member name (gr8s.server::virtual-node-names (gr8s.server::browser-join-nodes listener))
+                             :test #'equal))
                  ;; The first session is over: past what it had already been sent, it ends.
                  (is-true (loop repeat 50
                                 for opcode = (ignore-errors (gr8s.protocol::read-websocket-frame first))
                                 when (member opcode '(nil 8)) return t))))
           (dolist (socket sockets) (ignore-errors (usocket:socket-close socket)))
           (hunchentoot:stop listener)
+          (gr8s.server::stop-virtual-nodes host)
+          (gr8s.apiserver::stop-node-grpc-server server))))))
+
+;; A browser stand-in that runs whatever it is asked to, until its connection ends.
+(defun browser-node-test-serve (stream)
+  (bt:make-thread
+   (lambda ()
+     (handler-case
+         (loop for request = (browser-node-test-read stream)
+               while request
+               do (let ((id (gethash "id" request)))
+                    (when id
+                      (browser-node-test-send
+                       stream
+                       (gr8s.resources::core-object
+                        "id" id "result"
+                        (if (equal "ensure" (gethash "op" request))
+                            (gr8s.resources::core-object
+                             "status" (com.inuoe.jzon:parse
+                                       (format nil "{\"phase\":\"Running\",\"containerStatuses\":[{\"name\":\"web\",\"ready\":true,\"restartCount\":0,\"image\":\"busybox\",\"imageID\":\"\",\"containerID\":\"browser://~A/web\",\"started\":true,\"state\":{\"running\":{\"startedAt\":\"2026-11-26T00:00:00Z\"}}}]}"
+                                               (gethash "uid" (gethash "pod" request)))))
+                            (gr8s.resources::core-object)))))))
+       (error () nil)))
+   :name "test browser"))
+
+(test a-closed-tabs-node-and-its-pods-go-at-once
+  ;; podster-yucg: a tab that closes, or goes silent, takes its Node, its Pods and its
+  ;; enrollment with it at once, so the Pods' controllers replace them elsewhere without
+  ;; waiting for a lease to lapse. A server that stops leaves its nodes for their tabs.
+  (with-temporary-store (store path)
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0 :pki pki))
+           (runtime (gr8s.controllers::make-control-plane-runtime store server))
+           (reconciler (make-reconciler store runtime))
+           (host (gr8s.server::make-virtual-node-host store server pki (merge-pathnames "virtual/" path)
+                                                     :reconciler reconciler))
+           (listener (gr8s.server::start-browser-join-listener host "127.0.0.1" 0 :silence-seconds 2))
+           (port (hunchentoot:acceptor-port listener))
+           (sockets '()) (browsers '()))
+      (labels ((node-p (name)
+                 (handler-case (gr8s.controllers::get-node store name)
+                   (gr8s.model::kubernetes-error () nil)))
+               (ready-p (name)
+                 (let ((node (node-p name))) (and node (gr8s.model::node-record-ready-p node))))
+               (join (&key (serve t))
+                 (multiple-value-bind (stream socket) (browser-node-test-connect port)
+                   (push socket sockets)
+                   (let ((name (gethash "node" (browser-node-test-join stream :tab (format nil "~(~x~)" (random 65536))))))
+                     (when serve (push (browser-node-test-serve stream) browsers))
+                     (values name socket))))
+               (pod-on (name pod-name)
+                 (create-pod store
+                             (parse-pod
+                              (cl-ppcre:regex-replace
+                               "\\{\"containers\""
+                               (cl-ppcre:regex-replace "\"name\":\"hello\"" *valid-pod-json*
+                                                       (format nil "\"name\":\"~A\"" pod-name))
+                               (format nil "{\"nodeSelector\":{\"kubernetes.io/hostname\":\"~A\"},\"tolerations\":[{\"key\":\"gr8s.io/browser\",\"operator\":\"Exists\"}],\"containers\"" name))))
+                 (reconcile-pod reconciler "default" pod-name)
+                 (is-true (wait-until (lambda () (string= "Running" (gr8s.controllers::pod-scheduling-phase
+                                                                      store (get-pod store "default" pod-name))))
+                                      :timeout 20)))
+               (pod-gone-p (pod-name)
+                 (null (ignore-errors (get-pod store "default" pod-name)))))
+        (unwind-protect
+             (progn
+               ;; A tab that closes.
+               (multiple-value-bind (name socket) (join)
+                 (is-true (wait-until (lambda () (ready-p name)) :timeout 20))
+                 (pod-on name "closed")
+                 (is-true (probe-file (merge-pathnames (format nil "virtual/~A/" name) path)))
+                 (usocket:socket-close socket)
+                 (is-true (wait-until (lambda () (and (null (node-p name)) (pod-gone-p "closed"))) :timeout 5))
+                 (is (null (gr8s.server::virtual-node-names host)))
+                 (is (null (probe-file (merge-pathnames (format nil "virtual/~A/" name) path)))))
+               ;; A tab that stops answering, its connection still open.
+               (let ((name (join :serve nil)))
+                 (is-true (node-p name))
+                 (is-true (wait-until (lambda () (null (node-p name))) :timeout 10)))
+               ;; A server that stops keeps its tabs' nodes.
+               (multiple-value-bind (name socket) (join)
+                 (is-true (wait-until (lambda () (ready-p name)) :timeout 20))
+                 (hunchentoot:stop listener :soft nil)
+                 (usocket:socket-close socket)
+                 (is-true (wait-until (lambda () (null (gr8s.server::virtual-node-names host))) :timeout 10))
+                 (is-true (node-p name))))
+          (dolist (socket sockets) (ignore-errors (usocket:socket-close socket)))
+          (dolist (browser browsers)
+            (loop repeat 20 while (bt:thread-alive-p browser) do (sleep 0.1))
+            (when (bt:thread-alive-p browser) (ignore-errors (bt:destroy-thread browser))))
+          (ignore-errors (hunchentoot:stop listener))
           (gr8s.server::stop-virtual-nodes host)
           (gr8s.apiserver::stop-node-grpc-server server))))))
 

@@ -174,5 +174,7 @@ The API server's `/metrics` has `gr8s_browser_nodes`, `gr8s_browser_node_pods`,
 page shows its visitor the node, the cluster, and under each Pod a drop-down with
 its containers' logs and its VM's console, read from the tab itself.
 
-A node whose tab is gone goes NotReady when its lease expires, and is removed
-after a grace period.
+When a tab closes, or is silent for 10 s, its Node and its Pods are deleted at once,
+and their controllers start replacements on other nodes. A reload of the tab joins
+again as the same node. Nodes left behind by a server that stopped are removed once
+they have been gone for five minutes.
