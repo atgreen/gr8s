@@ -2141,6 +2141,66 @@ them. A node can't claim another's address or name."
           ;; Other peers are unaffected.
           (is (eq t (gethash "other" result)))))))
 
+(test browser-tabs-translate-services-their-pods-use
+  ;; A browser Pod's sockets are in its VM, so its tab translates ClusterIPs
+  ;; (podster-kw5u): the server tells it the Service ranges, and a Service port's ready
+  ;; backends when a Pod first connects to it.
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let ((service (fake-lb-service "10.96.0.11"))
+          (slice (endpointslice-test-object "svc-a" "10.80.16.2" 8080)))
+      ;; A Pod on a tab that left, not ready, listed before the Pod that has its address
+      ;; now: the live one counts.
+      (setf (gethash "kubernetes.io/service-name" (gethash "labels" (gethash "metadata" slice))) "svc"
+            (gethash "endpoints" slice)
+            (vector (gr8s.resources::core-object "addresses" #("10.80.16.2") "nodeName" "browser-gone"
+                                                 "conditions" (gr8s.resources::core-object "ready" nil))
+                    (gr8s.resources::core-object "addresses" #("10.80.16.2") "nodeName" "browser-b"
+                                                 "conditions" (gr8s.resources::core-object "ready" t))
+                    (gr8s.resources::core-object "addresses" #("10.80.32.3") "nodeName" "browser-a"
+                                                 "conditions" (gr8s.resources::core-object "ready" t))))
+      (gr8s.resources::create-core-resource store "services" service "default")
+      (gr8s.resources::create-core-resource store "endpointslices" slice "default")
+      (let ((address (gethash "clusterIP" (gethash "spec" (first (gr8s.resources::list-core-resources store "services"))))))
+        (is (equal '(("10.80.16.2" 8080) ("10.80.32.3" 8080))
+                   (gr8s.server::browser-service-backends store "browser-a" address 80 "TCP")))
+        ;; Another port or protocol, or an address that is no Service's, has none.
+        (is (null (gr8s.server::browser-service-backends store "browser-a" address 81 "TCP")))
+        (is (null (gr8s.server::browser-service-backends store "browser-a" address 80 "UDP")))
+        (is (null (gr8s.server::browser-service-backends store "browser-a" "10.96.9.9" 80 "TCP"))))
+      ;; Without ServiceCIDRs, the native default range.
+      (is (equal (list gr8s.controllers::+default-service-cidr+) (gr8s.server::browser-service-cidrs store)))))
+  ;; The tab's half, on frames a script builds.
+  (let ((output (ignore-errors
+                 (uiop:run-program (list "node" (namestring (asdf:system-relative-pathname
+                                                             "gr8s" "tests/browser-node/services-check.mjs")))
+                                   :output :string :error-output nil))))
+    (if (null output)
+        (skip "node is not available to run the tab's Service translation")
+        (let* ((result (com.inuoe.jzon:parse output))
+               (sent (coerce (gethash "sent" result) 'list))
+               (describe (lambda (frame)
+                           (list (gethash "source" frame) (gethash "sourcePort" frame)
+                                 (gethash "destination" frame) (gethash "destinationPort" frame)
+                                 (gethash "ipChecksumOk" frame) (gethash "tcpChecksumOk" frame)))))
+          ;; It asks once per Service port, and only about Services.
+          (is (equal '(("10.96.0.11" 80) ("10.96.0.12" 80))
+                     (map 'list (lambda (m) (list (gethash "address" m) (gethash "port" m))) (gethash "asked" result))))
+          (is (= 1 (gethash "straight" result)))
+          ;; Nothing for a Service goes before the server answers.
+          (is (= 0 (gethash "held" result)))
+          ;; Then every packet goes to the backend, with good checksums; none goes to a
+          ;; Service port without backends.
+          (is (equal '(("10.80.32.3" 40000 "10.80.16.2" 8080 t t)
+                       ("10.80.32.3" 40001 "10.80.16.2" 8080 t t)
+                       ("10.80.32.3" 40001 "10.80.16.2" 8080 t t)
+                       ("10.80.32.3" 40001 "10.80.16.2" 8080 t t)
+                       ("10.80.32.3" 40002 "10.80.16.2" 8080 t t))
+                     (mapcar describe sent)))
+          ;; The reply comes from the ClusterIP; other traffic is untouched.
+          (is (equal '("10.96.0.11" 80 "10.80.32.3" 40001 t t) (funcall describe (gethash "reply" result))))
+          (is (equal '("10.80.16.2" 8080 "10.80.32.3" 50000 t t) (funcall describe (gethash "other" result))))))))
+
 (test browser-stun-names-the-address-a-request-came-from
   ;; RFC 5769's sample: 192.0.2.1 port 32853 is XOR-MAPPED-ADDRESS port a147, address e112a643.
   (let* ((request (concatenate '(vector (unsigned-byte 8))

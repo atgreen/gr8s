@@ -257,11 +257,15 @@ terminating, as upstream's proxy reads them."
                                            :zone (gethash "zone" endpoint)
                                            :zone-hints (hint-names "forZones")
                                            :node-hints (hint-names "forNodes"))))
+                         ;; An address listed twice, as a departed node's Pod's beside the
+                         ;; Pod that has its address now, counts once: ready if either is.
                          (loop for address across (json-array (gethash "addresses" endpoint))
-                               unless (find-if (lambda (seen) (and (equal address (getf seen :address))
-                                                                   (eql (getf record :port) (getf seen :port))))
-                                               result)
-                                 do (push (list* :address address record) result)))))))))
+                               for seen = (find-if (lambda (seen) (and (equal address (getf seen :address))
+                                                                       (eql (getf record :port) (getf seen :port))))
+                                                   result)
+                               do (cond ((null seen) (push (list* :address address record) result))
+                                        ((and (getf record :ready) (not (getf seen :ready)))
+                                         (setf result (substitute (list* :address address record) seen result))))))))))))
     (values (nreverse result) found)))
 
 (defun service-slice-endpoints (store service port)

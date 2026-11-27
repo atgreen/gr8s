@@ -404,6 +404,160 @@ export function linkBackoff({ first = 10000, most = 600000, now = () => Date.now
   };
 }
 
+// The guest's NIC offloads TCP and UDP checksums, leaving only the pseudo-header
+// sum: as the "hardware" here, finish them before a frame leaves the Pod.
+function finishChecksum(frame) {
+  if (frame.length < 34 || frame[12] !== 0x08 || frame[13] !== 0x00) return frame; // IPv4 only
+  const ip = 14;
+  const headerLength = (frame[ip] & 0x0f) * 4;
+  const protocol = frame[ip + 9];
+  if (protocol !== 6 && protocol !== 17) return frame;
+  const totalLength = (frame[ip + 2] << 8) | frame[ip + 3];
+  const l4 = ip + headerLength;
+  const length = totalLength - headerLength;
+  if (l4 + length > frame.length || (frame[ip + 6] & 0x3f) || frame[ip + 7]) return frame; // fragments as they are
+  const field = l4 + (protocol === 6 ? 16 : 6);
+  if (protocol === 17 && frame[field] === 0 && frame[field + 1] === 0) return frame; // UDP without one
+  frame[field] = 0;
+  frame[field + 1] = 0;
+  let sum = protocol + length;
+  for (let i = ip + 12; i < ip + 20; i += 2) sum += (frame[i] << 8) | frame[i + 1];
+  for (let i = 0; i < length; i += 2) sum += (frame[l4 + i] << 8) | (i + 1 < length ? frame[l4 + i + 1] : 0);
+  while (sum > 0xffff) sum = (sum & 0xffff) + (sum >>> 16);
+  let checksum = ~sum & 0xffff;
+  if (checksum === 0 && protocol === 17) checksum = 0xffff;
+  frame[field] = checksum >> 8;
+  frame[field + 1] = checksum & 0xff;
+  return frame;
+}
+
+// An IPv4 frame's header checksum, again after its addresses change.
+function finishIpChecksum(frame) {
+  const ip = 14;
+  const headerLength = (frame[ip] & 0x0f) * 4;
+  frame[ip + 10] = 0;
+  frame[ip + 11] = 0;
+  let sum = 0;
+  for (let i = ip; i < ip + headerLength; i += 2) sum += (frame[i] << 8) | frame[i + 1];
+  while (sum > 0xffff) sum = (sum & 0xffff) + (sum >>> 16);
+  frame[ip + 10] = (~sum >> 8) & 0xff;
+  frame[ip + 11] = ~sum & 0xff;
+}
+
+// Services (podster-kw5u). A native node translates a ClusterIP where the Pod's socket
+// connects, in its kernel; a browser Pod's sockets live in its VM, so its tab, as its
+// node, translates. ASK sends the server a question. The tab knows only the Service ranges: the first packet of a
+// connection to an address in one asks the server for that Service port's ready
+// backends (held until the answer comes), so a tab learns only the Services its Pods
+// use. Each connection keeps the backend it was given, rewritten on the way out, and
+// its replies are rewritten back to the ClusterIP on the way in, whichever way they
+// came: through the server, a peer, or another Pod on this tab.
+export function serviceTranslation(ask) {
+  const IDLE = 300000, KNOWN = 5000;
+  let ranges = [];
+  const backends = new Map(); // "protocol address port" -> { list, at } or { waiting: [frames] }
+  const out = new Map(); // forward flow -> { address, port, at }
+  const back = new Map(); // reply flow -> { address, port, at }
+  const word = (frame, at) => (frame[at] << 8) | frame[at + 1];
+  const quad = (frame, at) => `${frame[at]}.${frame[at + 1]}.${frame[at + 2]}.${frame[at + 3]}`;
+  const setQuad = (frame, at, address) => address.split(".").forEach((part, i) => { frame[at + i] = Number(part); });
+  const setWord = (frame, at, value) => { frame[at] = value >> 8; frame[at + 1] = value & 0xff; };
+  const toNumber = (address) => address.split(".").reduce((n, part) => n * 256 + Number(part), 0) >>> 0;
+  const inRange = ([base, bits], address) => {
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    return ((base & mask) >>> 0) === ((toNumber(address) & mask) >>> 0);
+  };
+  // A TCP or UDP frame's flow, or null; fragments are left as they are.
+  const flow = (frame) => {
+    if (frame.length < 34 || frame[12] !== 0x08 || frame[13] !== 0x00 || frame[14] >> 4 !== 4) return null;
+    const protocol = frame[23];
+    const l4 = 14 + (frame[14] & 0x0f) * 4;
+    if ((protocol !== 6 && protocol !== 17) || frame.length < l4 + 4 || (frame[20] & 0x3f) || frame[21]) return null;
+    return { protocol, l4, source: quad(frame, 26), sourcePort: word(frame, l4), destination: quad(frame, 30), destinationPort: word(frame, l4 + 2) };
+  };
+  const name = (protocol, a, ap, b, bp) => `${protocol} ${a} ${ap} ${b} ${bp}`;
+  const sweep = () => {
+    const now = Date.now();
+    for (const table of [out, back]) for (const [k, v] of table) if (now - v.at > IDLE) table.delete(k);
+  };
+  let swept = Date.now();
+
+  function rewriteDestination(frame, f, address, port) {
+    setQuad(frame, 30, address);
+    setWord(frame, f.l4 + 2, port);
+    finishIpChecksum(frame);
+    finishChecksum(frame);
+  }
+
+  function translate(frame, f, list, forward) {
+    // A connection keeps its backend while it lives.
+    let chosen = out.get(forward);
+    if (!chosen) {
+      const [address, port] = list[Math.floor(Math.random() * list.length)];
+      chosen = { address, port, at: 0 };
+      out.set(forward, chosen);
+      back.set(name(f.protocol, address, port, f.source, f.sourcePort), { address: f.destination, port: f.destinationPort, at: 0 });
+    }
+    const now = Date.now();
+    chosen.at = now;
+    back.get(name(f.protocol, chosen.address, chosen.port, f.source, f.sourcePort)).at = now;
+    rewriteDestination(frame, f, chosen.address, chosen.port);
+  }
+
+  return {
+    update(info) {
+      ranges = (info.serviceCidrs ?? []).map((cidr) => {
+        const [base, bits] = cidr.split("/");
+        return [toNumber(base), Number(bits)];
+      });
+    },
+    // Send FRAME, a Pod's, with GO: at once unless it is for a Service, translated
+    // when it is, after the server says which backends the Service port has.
+    out(frame, go) {
+      const f = flow(frame);
+      if (!f || !ranges.some((range) => inRange(range, f.destination))) return go(frame);
+      if (Date.now() - swept > 60000) { sweep(); swept = Date.now(); }
+      const forward = name(f.protocol, f.source, f.sourcePort, f.destination, f.destinationPort);
+      if (out.has(forward)) { translate(frame, f, null, forward); return go(frame); }
+      const port = name(f.protocol, f.destination, f.destinationPort, "", "");
+      const known = backends.get(port);
+      if (known?.list && Date.now() - known.at < KNOWN) {
+        if (known.list.length === 0) return; // no ready backend: dropped, as a native node rejects it
+        translate(frame, f, known.list, forward);
+        return go(frame);
+      }
+      if (known?.waiting) { if (known.waiting.length < 64) known.waiting.push([frame, go]); return; }
+      backends.set(port, { waiting: [[frame, go]] });
+      ask({ op: "service", protocol: f.protocol === 6 ? "TCP" : "UDP", address: f.destination, port: f.destinationPort });
+      // An unanswered question is asked again by the next packet after a while.
+      setTimeout(() => { if (backends.get(port)?.waiting) backends.delete(port); }, KNOWN);
+    },
+    // The server's answer: send what waited for it.
+    answer(message) {
+      const protocol = message.protocol === "TCP" ? 6 : 17;
+      const port = name(protocol, message.address, message.port, "", "");
+      const waiting = backends.get(port)?.waiting ?? [];
+      const list = (message.backends ?? []).filter((b) => Array.isArray(b) && typeof b[0] === "string" && Number.isInteger(b[1]));
+      backends.set(port, { list, at: Date.now() });
+      for (const [frame, go] of waiting) this.out(frame, go);
+    },
+    // Rewrite FRAME, bound for one of this tab's Pods, back to the ClusterIP when it is
+    // a reply on a translated connection.
+    in(frame) {
+      if (back.size === 0) return frame;
+      const f = flow(frame);
+      if (!f) return frame;
+      const original = back.get(name(f.protocol, f.source, f.sourcePort, f.destination, f.destinationPort));
+      if (!original) return frame;
+      original.at = Date.now();
+      setQuad(frame, 26, original.address);
+      setWord(frame, f.l4, original.port);
+      finishIpChecksum(frame);
+      return finishChecksum(frame);
+    },
+  };
+}
+
 export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 256, capacity, log = () => {}, onInfo = () => {} }) {
   const pods = new Map(); // uid -> Pod
   const execs = new Map(); // exec id -> { process, pty }
@@ -417,35 +571,10 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
   const deliver = (frame, from) => {
     const destination = macOf(frame, 0);
     const local = nics.get(destination);
-    if (local && local !== from) local.kernel?.receiveFrame(frame);
+    if (local && local !== from) local.kernel?.receiveFrame(services.in(frame));
     else if (frame[0] & 1) for (const nic of nics.values()) if (nic !== from) nic.kernel?.receiveFrame(frame);
   };
-  // The guest's NIC offloads TCP and UDP checksums, leaving only the pseudo-header
-  // sum: as the "hardware" here, finish them before a frame leaves the Pod.
-  function finishChecksum(frame) {
-    if (frame.length < 34 || frame[12] !== 0x08 || frame[13] !== 0x00) return frame; // IPv4 only
-    const ip = 14;
-    const headerLength = (frame[ip] & 0x0f) * 4;
-    const protocol = frame[ip + 9];
-    if (protocol !== 6 && protocol !== 17) return frame;
-    const totalLength = (frame[ip + 2] << 8) | frame[ip + 3];
-    const l4 = ip + headerLength;
-    const length = totalLength - headerLength;
-    if (l4 + length > frame.length || (frame[ip + 6] & 0x3f) || frame[ip + 7]) return frame; // fragments as they are
-    const field = l4 + (protocol === 6 ? 16 : 6);
-    if (protocol === 17 && frame[field] === 0 && frame[field + 1] === 0) return frame; // UDP without one
-    frame[field] = 0;
-    frame[field + 1] = 0;
-    let sum = protocol + length;
-    for (let i = ip + 12; i < ip + 20; i += 2) sum += (frame[i] << 8) | frame[i + 1];
-    for (let i = 0; i < length; i += 2) sum += (frame[l4 + i] << 8) | (i + 1 < length ? frame[l4 + i + 1] : 0);
-    while (sum > 0xffff) sum = (sum & 0xffff) + (sum >>> 16);
-    let checksum = ~sum & 0xffff;
-    if (checksum === 0 && protocol === 17) checksum = 0xffff;
-    frame[field] = checksum >> 8;
-    frame[field + 1] = checksum & 0xff;
-    return frame;
-  }
+  const services = serviceTranslation((message) => send(message));
 
   // East-west between tabs (podster-57fv.13). Each other browser node is reached over a
   // WebRTC data channel when one opens: a Pod's packet for an address in that node's
@@ -716,7 +845,7 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       frame[12] = 0x08;
       frame[13] = 0x00;
       frame.set(packet, 14);
-      nic.kernel.receiveFrame(frame);
+      nic.kernel.receiveFrame(services.in(frame));
     }
 
     // Layers a peer asks for: from the cache, in chunks, then an end marker.
@@ -860,12 +989,23 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     nic.device = {
       mac,
       attach: (kernel) => { nic.kernel = kernel; },
-      send: (frame) => {
-        frame = finishChecksum(new Uint8Array(frame));
+      send: (frame) => services.out(new Uint8Array(frame), (frame) => {
+        frame = finishChecksum(frame);
+        // A Service's backend in this tab: the frame came for the gateway, so switch it
+        // to that Pod's NIC here, as a native node delivers to a local backend.
+        if (frame.length >= 34 && frame[12] === 0x08 && frame[13] === 0x00) {
+          const address = `${frame[30]}.${frame[31]}.${frame[32]}.${frame[33]}`;
+          const local = [...pods.values()].find((pod) => pod.nic && pod.request.network?.address === address)?.nic;
+          if (local && local !== nic) {
+            frame.set(local.mac, 0);
+            deliver(frame, nic);
+            return;
+          }
+        }
         if (peering.send(frame)) return;
         if (socket.readyState === 1) socket.send(frame);
         deliver(frame, nic);
-      },
+      }),
       close: () => nics.delete(macOf(mac, 0)),
     };
     return nic;
@@ -908,12 +1048,17 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     }
     const message = JSON.parse(event.data);
     if (message.op === "info") {
+      services.update(message);
       peering.update(message);
       onInfo(message);
       return;
     }
     if (message.op === "signal") {
       peering.signal(message.from, message.data);
+      return;
+    }
+    if (message.op === "service") {
+      services.answer(message);
       return;
     }
     if (message.op === "exec-input" || message.op === "exec-resize" || message.op === "exec-kill") {
