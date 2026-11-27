@@ -156,7 +156,7 @@ passing each running exec its output."
             (let ((op (gethash "op" message)))
               (cond ((and (equal "status" op) (stringp (gethash "uid" message)))
                      (browser-runtime-note-status runtime (gethash "uid" message) (gethash "status" message)))
-                    ((member op '("signal" "have") :test #'equal)
+                    ((member op '("signal" "have" "service") :test #'equal)
                      (let ((handler (browser-runtime-peer-handler runtime)))
                        (when handler (funcall handler message))))
                     ((member op '("exec-output" "exec-exit") :test #'equal)
@@ -512,10 +512,27 @@ Namespaces, until SESSION ends."
 
 (defun browser-peer-message (acceptor from message)
   "Handle MESSAGE, which the browser node FROM sent for its peers: relay a WebRTC \"signal\"
-to the browser node it names, or record the layers it says it holds. Only connected
-browser nodes are reached, and each learns whom a signal is from from this server."
+to the browser node it names, record the layers it says it holds, or tell it a Service
+port's backends. Only connected browser nodes are reached, and each learns whom a signal
+is from from this server."
   (let ((op (gethash "op" message)))
-    (cond ((equal op "signal")
+    (cond ((equal op "service")
+           (let ((protocol (gethash "protocol" message))
+                 (address (gethash "address" message))
+                 (port (gethash "port" message))
+                 (session (gethash from (browser-join-sessions acceptor))))
+             (when (and session (member protocol '("TCP" "UDP") :test #'equal)
+                        (stringp address) (integerp port))
+               (ignore-errors
+                (browser-session-send
+                 session
+                 (core-object "op" "service" "protocol" protocol "address" address "port" port
+                              "backends" (coerce (mapcar (lambda (backend) (coerce backend 'vector))
+                                                         (browser-service-backends
+                                                          (virtual-node-host-store (browser-join-nodes acceptor))
+                                                          from address port protocol))
+                                                 'vector)))))))
+          ((equal op "signal")
            (let* ((to (gethash "to" message))
                   (target (and (stringp to) (browser-peers-p acceptor from to)
                                (gethash to (browser-join-sessions acceptor)))))
@@ -531,6 +548,26 @@ browser nodes are reached, and each learns whom a signal is from from this serve
                            repeat 4096
                            when (and (stringp digest) (cl-ppcre:scan "^sha256:[0-9a-f]{64}$" digest))
                              collect digest))))))))
+
+(defun browser-service-backends (store node address port protocol)
+  "The ready backends, as (address port) lists, that the browser node NODE's Pods reach at
+the Service ClusterIP ADDRESS on PORT and PROTOCOL (\"TCP\" or \"UDP\"), as a native node's
+Service translation finds them; NIL when that is no Service's port or it has none."
+  (dolist (service (gr8s.resources::list-core-resources store "services"))
+    (when (and (gr8s.controllers::service-lb-eligible-p service)
+               (member address (gr8s.controllers::service-cluster-addresses service) :test #'equal))
+      (loop for entry across (gr8s.controllers::json-array (gethash "ports" (gethash "spec" service)))
+            when (and (eql port (gethash "port" entry)) (equal protocol (gethash "protocol" entry "TCP")))
+              do (return-from browser-service-backends
+                   (remove-if (lambda (backend) (find #\: (first backend)))
+                              (gr8s.controllers::service-port-backends store service entry :node-name node))))))
+  nil)
+
+(defun browser-service-cidrs (store)
+  "The IPv4 ranges STORE's ClusterIPs come from, as CIDR strings, for tabs to translate."
+  (loop for (nil family network prefix) in (gr8s.controllers::service-cidr-prefixes store)
+        when (equal family "IPv4")
+          collect (format nil "~A/~D" (gr8s.controllers::format-service-address family network) prefix)))
 
 (defun browser-peers-p (acceptor one other)
   "Whether browser nodes ONE and OTHER may connect directly, by ACCEPTOR's peering."
@@ -593,7 +630,8 @@ ask it for RUNTIME's statistics, timing the answer."
                                       (gethash "stunPort" info) (let ((stun (browser-join-stun acceptor)))
                                                                   (if stun (browser-stun-port stun) 'null))
                                       (gethash "peering" info) (string-downcase (browser-join-peering acceptor))
-                                      (gethash "ingressPolicy" info) (browser-node-ingress-policy runtime)))
+                                      (gethash "ingressPolicy" info) (browser-node-ingress-policy runtime)
+                                      (gethash "serviceCidrs" info) (coerce (browser-service-cidrs store) 'vector)))
                               (browser-session-send session info))
                 (error () (return)))
               (when (and runtime (zerop (mod tick (ceiling +browser-node-stats-seconds+ +browser-node-info-seconds+))))
