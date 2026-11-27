@@ -103,7 +103,9 @@ which registry and repository each layer it may serve comes from."
   (resolved (make-hash-table :test #'equal))
   (layers (make-hash-table :test #'equal))
   ;; Each resolved image's regular files, path -> digest (browser-content.lisp).
-  (files (make-hash-table :test #'equal)))
+  (files (make-hash-table :test #'equal))
+  ;; Each served layer's torrent description, by digest (browser-image-torrent).
+  (torrents (make-hash-table :test #'equal)))
 
 (defun make-browser-images (directory)
   "An image cache for browser nodes under DIRECTORY."
@@ -205,3 +207,42 @@ NIL when DIGEST belongs to no image this server resolved."
                          (delete-file temporary))
                   (rename-file temporary path)))))
         path))))
+
+;;; Tabs share layers with each other the way agents do (podster-9mio): each layer is a
+;;; BitTorrent v2 torrent (BEP 52), its pieces checked against a Merkle tree, swapped over
+;;; the standard peer wire. A tab can't reach the agents' tracker or peers, so the server
+;;; describes each layer's torrent to it, names the tabs that hold the layer, and seeds
+;;; every piece itself over HTTP. A layer served as stored gets the very torrent agents
+;;; build for it, bound to its OCI digest; a zstd layer, served decompressed, gets one
+;;; bound to the digest of the bytes served.
+
+(defparameter +browser-torrent-piece-length+ gr8s.image-distribution::+default-image-piece-length+
+  "The piece length of layers' torrents: the agents'.")
+
+(defun browser-image-torrent (images digest)
+  "The torrent of layer DIGEST as served to tabs, as an object a tab uses: its v2
+infohash, piece length, length, the SHA-256 Merkle root of each piece, and the digest of
+the bytes it covers. NIL when DIGEST belongs to no image this server resolved."
+  (or (bt:with-lock-held ((browser-images-lock images))
+        (gethash digest (browser-images-torrents images)))
+      (let ((path (browser-image-layer-file images digest)))
+        (when path
+          (let* ((decompressed (search "zstd" (fourth (bt:with-lock-held ((browser-images-lock images))
+                                                         (gethash digest (browser-images-layers images))))))
+                 (content (if decompressed
+                              (format nil "sha256:~(~A~)" (ironclad:byte-array-to-hex-string
+                                                           (ironclad:digest-file :sha256 path)))
+                              digest))
+                 (torrent (gr8s.image-distribution::make-oci-blob-torrent path content +browser-torrent-piece-length+))
+                 (file (cl-torrent:blob-torrent-file torrent))
+                 (description
+                   (core-object
+                    "digest" digest
+                    "content" content
+                    "infohash" (ironclad:byte-array-to-hex-string (cl-torrent:torrent-infohash torrent))
+                    "pieceLength" (cl-torrent:torrent-piece-length torrent)
+                    "length" (cl-torrent:blob-torrent-length torrent)
+                    "pieces" (map 'vector #'ironclad:byte-array-to-hex-string
+                                  (cl-torrent::torrent-file-piece-hashes file)))))
+            (bt:with-lock-held ((browser-images-lock images))
+              (setf (gethash digest (browser-images-torrents images)) description)))))))

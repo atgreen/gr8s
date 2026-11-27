@@ -250,6 +250,19 @@ podster-135e and podster-i8my) still help native nodes.
   session, where NetworkPolicy is enforced. Direct peers learn each other's public
   address, so `--browser-peering` limits who connects directly: `same-network` (the
   default; tabs whose browsers come from one client address), `all`, or `none`.
+- **Layers between tabs** (podster-9mio). Tabs share layers with the agents' BitTorrent
+  protocol. Each layer is a BEP 52 torrent: for a layer served as stored, the torrent the
+  agents build for it, bound to its OCI digest; for a zstd layer, served decompressed, one
+  bound to the digest of the bytes served. The join listener describes it at
+  `/torrents/DIGEST` (infohash, piece length, each piece's Merkle root). Tabs speak the
+  standard peer wire over a WebRTC data channel per peer and layer (`bt:DIGEST`), byte for
+  byte as cl-torrent does: handshake, bitfield, have, interested, unchoke, request,
+  piece. A tab asks up to 8 tabs the server names as holding the layer, completely or
+  partly, for pieces, rarest first, and checks each piece against its root as it
+  arrives; a peer that sends a bad piece is dropped. It shares what it has while still
+  downloading. The server seeds every piece over HTTP ranges, starting after a short head
+  start for the tabs and from the other end, so a layer always arrives. Tabs can't reach
+  agents directly (agents speak no WebRTC), so the two swarms meet only at the server.
 - **Checked content** (`src/server/browser-content.lisp`). Whoever runs a tab can change
   what its Pods do, and browsers offer no attestation, so a response from a browser Pod
   can't be proven to have been computed faithfully. Its content can be checked, though:

@@ -2044,6 +2044,82 @@ them. A node can't claim another's address or name."
   (is (not (gr8s.server::loopback-address-p "127.0.0.2")))
   (is (not (gr8s.server::loopback-address-p "78.18.12.235"))))
 
+(test browser-tabs-speak-the-agents-bittorrent
+  ;; Tabs share layers with the agents' protocol: the server describes each layer's torrent
+  ;; as cl-torrent builds it, and the tab's codec (run under Node) sends the same bytes the
+  ;; agents send and computes the same piece roots.
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let* ((octets (let ((state (sb-ext:seed-random-state 42)))
+                     (coerce (loop repeat (+ (* 2 32768) 5000) collect (random 256 state))
+                             '(simple-array (unsigned-byte 8) (*)))))
+           (digest (format nil "sha256:~(~A~)" (ironclad:byte-array-to-hex-string
+                                                 (ironclad:digest-sequence :sha256 octets))))
+           (images (gr8s.server::make-browser-images (merge-pathnames "images/" path)))
+           (layer (merge-pathnames (make-pathname :name (subseq digest 7) :type "layer")
+                                   (merge-pathnames "images/" path))))
+      (ensure-directories-exist layer)
+      (with-open-file (out layer :direction :output :element-type '(unsigned-byte 8))
+        (write-sequence octets out))
+      (setf (gethash digest (gr8s.server::browser-images-layers images))
+            (list "registry.example" "repo" nil "application/vnd.oci.image.layer.v1.tar+gzip"))
+      ;; The server's description is the agents' torrent of the layer.
+      (let* ((description (gr8s.server::browser-image-torrent images digest))
+             (agents (gr8s.image-distribution::make-oci-blob-torrent
+                      layer digest gr8s.server::+browser-torrent-piece-length+)))
+        (is (equal digest (gethash "content" description)))
+        (is (equal (ironclad:byte-array-to-hex-string (cl-torrent:torrent-infohash agents))
+                   (gethash "infohash" description)))
+        (is (= (length octets) (gethash "length" description))))
+      (is (null (gr8s.server::browser-image-torrent images (format nil "sha256:~64,'0D" 0))))
+      ;; The wire, and piece roots at a small piece length, against Node.
+      (let* ((torrent (cl-torrent:make-blob-torrent layer :piece-length 32768 :content-id digest))
+             (infohash (cl-torrent:torrent-infohash torrent))
+             (peer-id (coerce (loop for i below 20 collect (+ 65 i)) '(simple-array (unsigned-byte 8) (*))))
+             (hex #'ironclad:byte-array-to-hex-string)
+             (agent-messages
+               (list (cl-torrent:make-peer-message :kind :interested)
+                     (cl-torrent:make-peer-message :kind :unchoke)
+                     (cl-torrent:make-peer-message :kind :have :piece 2)
+                     (cl-torrent:make-peer-message :kind :bitfield :payload (coerce #(#b10100000) '(vector (unsigned-byte 8))))
+                     (cl-torrent:make-peer-message :kind :request :piece 1 :begin 16384 :length 16384)
+                     (cl-torrent:make-peer-message :kind :piece :piece 2 :begin 0
+                                                   :payload (coerce #(1 2 3 4 5) '(vector (unsigned-byte 8))))))
+             (cases (merge-pathnames "cases.json" path)))
+        (with-open-file (out cases :direction :output :if-exists :supersede)
+          (com.inuoe.jzon:stringify
+           (gr8s.resources::core-object
+            "file" (namestring layer) "pieceLength" 32768
+            "infohash" (funcall hex infohash) "peerId" (funcall hex peer-id)
+            "agentHandshake" (funcall hex (cl-torrent:encode-peer-handshake infohash peer-id))
+            "agentMessages" (map 'vector (lambda (m) (funcall hex (cl-torrent:encode-peer-message m))) agent-messages)
+            "messages" (vector (gr8s.resources::core-object "kind" "interested")
+                               (gr8s.resources::core-object "kind" "unchoke")
+                               (gr8s.resources::core-object "kind" "have" "piece" 2)
+                               (gr8s.resources::core-object "kind" "bitfield" "payload" "a0")
+                               (gr8s.resources::core-object "kind" "request" "piece" 1 "begin" 16384 "length" 16384)
+                               (gr8s.resources::core-object "kind" "piece" "piece" 2 "begin" 0 "payload" "0102030405"))
+            "have" (vector 1 0 1))
+           :stream out))
+        (let ((output (ignore-errors
+                       (uiop:run-program (list "node" (namestring (asdf:system-relative-pathname
+                                                                   "gr8s" "tests/browser-node/bittorrent-check.mjs"))
+                                               (namestring cases))
+                                         :output :string :error-output nil))))
+          (if (null output)
+              (skip "node is not available to run the tab's codec")
+              (let ((result (com.inuoe.jzon:parse output)))
+                (is (equal (funcall hex (cl-torrent:encode-peer-handshake infohash peer-id))
+                           (gethash "handshake" result)))
+                (is (equal (subseq (funcall hex infohash) 0 40) (gethash "parsedHandshake" result)))
+                (is (equal (mapcar (lambda (m) (funcall hex (cl-torrent:encode-peer-message m))) agent-messages)
+                           (coerce (gethash "messages" result) 'list)))
+                (is (equal '("interested" "unchoke" "have" "bitfield" "request" "piece")
+                           (map 'list (lambda (m) (gethash "kind" m)) (gethash "decoded" result))))
+                (is (equal "a0" (gethash "bitfield" result)))
+                (is (equal (map 'list hex (cl-torrent::torrent-file-piece-hashes (cl-torrent:blob-torrent-file torrent)))
+                           (coerce (gethash "pieces" result) 'list))))))))))
+
 (test browser-stun-names-the-address-a-request-came-from
   ;; RFC 5769's sample: 192.0.2.1 port 32853 is XOR-MAPPED-ADDRESS port a147, address e112a643.
   (let* ((request (concatenate '(vector (unsigned-byte 8))
