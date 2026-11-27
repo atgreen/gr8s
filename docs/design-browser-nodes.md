@@ -242,6 +242,14 @@ podster-135e and podster-i8my) still help native nodes.
   node admission. ServiceAccount token volumes pass, because the browser runtime
   mounts no volumes.
 - **Capacity.** What the tab offered, clamped to 8 CPUs, 8Gi and 16 Pods.
+- **Across NATs.** Tabs connect to each other over WebRTC, with the server relaying their
+  signalling. To connect directly when they sit behind different NATs, each needs its
+  public address: `serve --browser-stun-listen HOST:PORT` answers STUN binding requests
+  itself (`src/server/browser-stun.lisp`), and tabs ask it at the page's own hostname.
+  There is no TURN: a tab that can't reach a peer directly reaches it through its
+  session, where NetworkPolicy is enforced. Direct peers learn each other's public
+  address, so `--browser-peering` limits who connects directly: `same-network` (the
+  default; tabs whose browsers come from one client address), `all`, or `none`.
 - **Checked content** (`src/server/browser-content.lisp`). Whoever runs a tab can change
   what its Pods do, and browsers offer no attestation, so a response from a browser Pod
   can't be proven to have been computed faithfully. Its content can be checked, though:

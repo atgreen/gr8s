@@ -37,6 +37,7 @@
   .hero { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 24px; box-shadow: var(--shadow);
           display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: center; }
   .eyebrow { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+  .peering { margin: -6px 0 18px; font-size: 14px; color: var(--muted); }
   .node-name { font: 600 clamp(24px, 4vw, 34px)/1.2 var(--mono); margin: 6px 0 10px; word-break: break-all; }
   .facts { display: flex; flex-wrap: wrap; gap: 8px; }
   .fact { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; font-size: 13px; color: var(--muted); }
@@ -102,6 +103,8 @@
     </div>
     <button id="leave">Leave the cluster</button>
   </div>
+  <p class="peering" id="peering" hidden>Other visitors' tabs connect to this one directly, to share
+    image layers and Pod traffic, so they can see this network's public IP address.</p>
 
   <div class="stats">
     <div class="stat"><div class="label">Pods in this tab</div><div class="value" id="here">0</div><div class="sub">each in its own Linux</div></div>
@@ -177,6 +180,7 @@
     $("running-sub").textContent = `of ${cluster.pods} Pods in the cluster`;
     $("running-bar").style.width = `${cluster.pods ? (100 * cluster.runningPods) / cluster.pods : 0}%`;
     $("version").textContent = cluster.version ? `gr8s ${cluster.version}` : "";
+    $("peering").hidden = info.peering !== "all";
     $("pods-sub").textContent = pods.length ? `${pods.length} Pod${pods.length === 1 ? "" : "s"}` : "";
     const hint = `kubectl run hello --image=busybox --overrides='{"spec":{"nodeName":"${node.name}","tolerations":[{"key":"gr8s.io/browser","operator":"Exists"}]}}' -- sh -c 'echo hi; sleep 3600'`;
     if (!pods.length) {

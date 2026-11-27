@@ -1999,7 +1999,7 @@ them. A node can't claim another's address or name."
 (test browser-nodes-introduce-their-peers-and-only-relay-between-them
   ;; podster-57fv.12/.13: the server relays WebRTC signals between connected browser
   ;; nodes, saying who sent them, and remembers which layers each holds.
-  (let ((listener (make-instance 'gr8s.server::browser-join-acceptor :port 0 :nodes nil))
+  (let ((listener (make-instance 'gr8s.server::browser-join-acceptor :port 0 :nodes nil :peering :all))
         (streams (make-hash-table :test #'equal))
         (digest "sha256:55d2dadd4bbc7132e31b89f47d8f7cc517cac013563328b707c933d42c4a2c07"))
     (dolist (name '("browser-a" "browser-b"))
@@ -2043,6 +2043,52 @@ them. A node can't claim another's address or name."
   (is (gr8s.server::loopback-address-p "0.0.0.0"))
   (is (not (gr8s.server::loopback-address-p "127.0.0.2")))
   (is (not (gr8s.server::loopback-address-p "78.18.12.235"))))
+
+(test browser-stun-names-the-address-a-request-came-from
+  ;; RFC 5769's sample: 192.0.2.1 port 32853 is XOR-MAPPED-ADDRESS port a147, address e112a643.
+  (let* ((request (concatenate '(vector (unsigned-byte 8))
+                               #(0 1 0 0 #x21 #x12 #xA4 #x42) #(#xb7 #xe7 #xa7 #x01 #xbc #x34 #xd6 #x86 #xfa #x87 #xdf #xae)))
+         (response (gr8s.server::stun-binding-response request #(192 0 2 1) 32853)))
+    (is (equalp #(1 1 0 12 #x21 #x12 #xA4 #x42) (subseq response 0 8)))
+    (is (equalp (subseq request 8 20) (subseq response 8 20)))
+    (is (equalp #(0 #x20 0 8 0 1 #xa1 #x47 #xe1 #x12 #xa6 #x43) (subseq response 20 32))))
+  ;; Anything but a well-formed binding request gets no answer.
+  (is (null (gr8s.server::stun-binding-response #(0 1 0 0 1 2 3 4 0 0 0 0 0 0 0 0 0 0 0 0) #(192 0 2 1) 1)))
+  (is (null (gr8s.server::stun-binding-response #(1 1 0 0 #x21 #x12 #xA4 #x42 0 0 0 0 0 0 0 0 0 0 0 0) #(192 0 2 1) 1)))
+  (is (null (gr8s.server::stun-binding-response #(0 1) #(192 0 2 1) 1)))
+  ;; And over UDP.
+  (let ((stun (gr8s.server::start-browser-stun "127.0.0.1" 0))
+        (socket (make-instance 'sb-bsd-sockets:inet-socket :type :datagram :protocol :udp))
+        (buffer (make-array 64 :element-type '(unsigned-byte 8))))
+    (unwind-protect
+         (progn
+           (sb-bsd-sockets:socket-bind socket #(127 0 0 1) 0)
+           (sb-bsd-sockets:socket-send socket (coerce #(0 1 0 0 #x21 #x12 #xA4 #x42 1 2 3 4 5 6 7 8 9 10 11 12)
+                                                      '(simple-array (unsigned-byte 8) (*)))
+                                       nil :address (list #(127 0 0 1) (gr8s.server::browser-stun-port stun)))
+           (let* ((length (nth-value 1 (sb-bsd-sockets:socket-receive socket buffer nil)))
+                  (port (nth-value 1 (sb-bsd-sockets:socket-name socket)))
+                  (x-port (logxor port #x2112)))
+             (is (= 32 length))
+             (is (equalp (vector (ldb (byte 8 8) x-port) (ldb (byte 8 0) x-port)) (subseq buffer 26 28)))))
+      (sb-bsd-sockets:socket-close socket)
+      (gr8s.server::stop-browser-stun stun))))
+
+(test browser-peering-says-which-tabs-connect-directly
+  ;; Tabs that connect directly learn each other's public address, so by default only
+  ;; tabs from one network do; the others still reach each other through the server.
+  (flet ((acceptor (peering)
+           (let ((acceptor (make-instance 'gr8s.server::browser-join-acceptor :nodes nil :peering peering)))
+             (setf (gethash "a" (gr8s.server::browser-join-clients acceptor)) "198.51.100.1"
+                   (gethash "b" (gr8s.server::browser-join-clients acceptor)) "198.51.100.1"
+                   (gethash "c" (gr8s.server::browser-join-clients acceptor)) "203.0.113.9")
+             acceptor)))
+    (let ((same (acceptor :same-network)) (all (acceptor :all)) (none (acceptor :none)))
+      (is (gr8s.server::browser-peers-p same "a" "b"))
+      (is (not (gr8s.server::browser-peers-p same "a" "c")))
+      (is (not (gr8s.server::browser-peers-p same "a" "a")))
+      (is (gr8s.server::browser-peers-p all "a" "c"))
+      (is (not (gr8s.server::browser-peers-p none "a" "b"))))))
 
 (test browser-joins-are-limited-in-all-and-per-client
   ;; A public join page must not take every browser that comes: at most so many nodes,
