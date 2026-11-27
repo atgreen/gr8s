@@ -365,6 +365,32 @@ function now() {
  * cluster. Returns { close(), node: Promise<name>, closed: Promise }.
  */
 /** What browser this is, as { name, os }: the server shows only names it knows. */
+// The GPU this tab can lend its Pods (podster-tr2r): its WebGPU adapter, which unkernel
+// gives a Pod's VM as a Vulkan device. Null without one, or with only a software one
+// (SwiftShader, a fallback adapter), which would gain a Pod nothing.
+async function describeGpu() {
+  try {
+    const adapter = await globalThis.navigator?.gpu?.requestAdapter({ powerPreference: "high-performance" });
+    if (!adapter) return null;
+    const info = adapter.info ?? {};
+    if (info.isFallbackAdapter || adapter.isFallbackAdapter || /swiftshader/i.test(`${info.vendor} ${info.architecture}`)) return null;
+    return {
+      vendor: info.vendor ?? "", architecture: info.architecture ?? "", description: info.description ?? "",
+      maxBufferSize: adapter.limits.maxBufferSize, maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Whether a Pod asks for this tab's GPU.
+const wantsGpu = (spec) => (spec.containers ?? []).some((c) => Number(c.resources?.limits?.["gr8s.io/gpu"] ?? 0) > 0);
+
+// The Vulkan driver unkernel's base carries, for a container root: the loader in the
+// image finds it by this manifest, and the driver's directory is bound from the base.
+const VULKAN_DRIVER = "/usr/lib/kw";
+const VULKAN_MANIFEST = JSON.stringify({ file_format_version: "1.0.0", ICD: { library_path: `${VULKAN_DRIVER}/libvulkan_kw.so`, api_version: "1.0.314" } });
+
 function describeBrowser() {
   const ua = globalThis.navigator?.userAgent ?? "";
   const name = /SamsungBrowser/.test(ua) ? "Samsung Internet"
@@ -1042,6 +1068,7 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       },
       arch: "arm64",
       browser: describeBrowser(),
+      gpu: await describeGpu(),
     });
   };
   socket.onclose = async () => {
@@ -1148,7 +1175,8 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       log(`starting ${request.namespace}/${request.name}`);
       const network = request.network;
       if (network) pod.nic = makeNic();
-      pod.vm = await createKernel({ distro, memoryMiB, ...(network ? { net: pod.nic.device } : {}) });
+      pod.gpu = wantsGpu(request.spec);
+      pod.vm = await createKernel({ distro, memoryMiB, ...(network ? { net: pod.nic.device } : {}), ...(pod.gpu ? { vk: true } : {}) });
       // The VM's console, from its boot on, for the page to show.
       const consoleText = new TextDecoder();
       pod.vm.output?.pipeTo(new WritableStream({
@@ -1190,6 +1218,12 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
       await unpackLayer(fs, new Response(bytes), layer.mediaType ?? "");
     }
     for (const dir of ["/proc", "/dev", "/tmp", "/etc"]) fs.mkdirp(dir);
+    if (pod.gpu) {
+      fs.mkdirp(VULKAN_DRIVER);
+      fs.mkdirp("/etc/vulkan/icd.d");
+      fs.rm("/etc/vulkan/icd.d/gr8s-webgpu.json", { force: true });
+      fs.writeFile("/etc/vulkan/icd.d/gr8s-webgpu.json", VULKAN_MANIFEST);
+    }
     // Cluster DNS and the Pod's own name, as the kubelet writes them.
     const network = pod.request.network;
     if (network?.dns) {
@@ -1202,6 +1236,10 @@ export function joinCluster({ url, createKernel, MemoryFs, distro, memoryMiB = 2
     }
     await pod.vm.exec("mkdir", ["-p", root], { user: "root" });
     await pod.vm.mount(root, fs);
+    if (pod.gpu) {
+      const bound = await pod.vm.exec("mount", ["--bind", VULKAN_DRIVER, `${root}${VULKAN_DRIVER}`], { user: "root" });
+      if (bound.exitCode !== 0) throw new Error(`the GPU driver: ${bound.stderr}`);
+    }
     log(`${pod.request.name}/${spec.name}: ${spec.image} unpacked (${info.layers.length} layers)`);
     return root;
   }

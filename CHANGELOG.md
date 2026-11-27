@@ -9,6 +9,10 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- Pods on browser nodes can use the visitor's GPU (podster-tr2r): a tab with a
+  hardware WebGPU adapter offers `gr8s.io/gpu: 1` and labels naming it, and a Pod that
+  asks for it gets Vulkan 1.2 on the tab's WebGPU device, with the driver given to its
+  containers.
 - Browser tabs rejoin on their own when their server restarts or is upgraded, and
   always on the server's current page and runtime: the page is never cached and loads
   the runtime at a URL naming its hash (podster-w22b).
