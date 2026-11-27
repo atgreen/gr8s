@@ -100,7 +100,8 @@
     <p class="lede">This is a demonstration of <a href="https://github.com/atgreen/gr8s">gr8s</a>, a
       Kubernetes-compatible cluster in one Common Lisp executable, and of its ability to run worker nodes in your browser!
       OK, maybe not so practical, but definitely fun.</p>
-    <p class="lede">Open the join page, and your tab becomes a worker node of the cluster. The scheduler sends it
+    <p class="lede">The cluster has a single control plane node, on a modest cloud VM with 4 vCPUs and 8 GB of
+      memory. Open the join page, and your tab becomes a worker node of the cluster. The scheduler sends it
       Pods. Each Pod runs in its own Linux VM inside your browser, on the cluster's Pod network, and talks peer to
       peer with Pods in other visitors' tabs. You install nothing, and when you close the tab, it leaves the
       cluster.</p>
