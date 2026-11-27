@@ -631,8 +631,38 @@ others go through this host.")
    (epochs :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-epochs
            :documentation "The last epoch each node's session had.")
    (runtimes :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-runtimes
-             :documentation "Each connected browser node's runtime, by node name."))
+             :documentation "Each connected browser node's runtime, by node name.")
+   (max-nodes :initarg :max-nodes :initform 64 :reader browser-join-max-nodes
+              :documentation "How many browser nodes may be connected at once.")
+   (max-per-client :initarg :max-per-client :initform 4 :reader browser-join-max-per-client
+                   :documentation "How many of them may come from one client address.")
+   (clients :initform (make-hash-table :test #'equal :synchronized t) :reader browser-join-clients
+            :documentation "The client address of each connected browser node, by node name."))
   (:documentation "Serves the join page and accepts browser nodes' sessions."))
+
+(defun browser-join-client-address (acceptor request)
+  "The address of the browser behind REQUEST: the last hop of its X-Forwarded-For when the
+connection comes from this host (the Gateway, on a node of this cluster, in front of the
+listener), else the connection's own address. A client can't name itself another address
+by sending the header, as only this host's proxies are believed."
+  (let ((peer (hunchentoot:remote-addr request))
+        (forwarded (hunchentoot:header-in :x-forwarded-for request)))
+    (if (and forwarded
+             (or (uiop:string-prefix-p "127." peer) (equal peer "::1")
+                 (equal peer (hunchentoot:acceptor-address acceptor))))
+        (string-trim " " (car (last (uiop:split-string forwarded :separator ","))))
+        peer)))
+
+(defun browser-join-refusal (acceptor name client)
+  "Why the browser at CLIENT may not join as node NAME now, or NIL. A node already
+connected may always come back, as a reload of its tab replaces its session."
+  (unless (gethash name (browser-join-sessions acceptor))
+    (cond ((>= (hash-table-count (browser-join-sessions acceptor)) (browser-join-max-nodes acceptor))
+           "this cluster has as many browser nodes as it takes; try again later")
+          ((>= (loop for address being the hash-values of (browser-join-clients acceptor)
+                     count (equal address client))
+               (browser-join-max-per-client acceptor))
+           "this network already has as many browser nodes as one may; close another tab first"))))
 
 (defun hex-prefix (octets count)
   (format nil "~(~{~2,'0x~}~)" (coerce (subseq octets 0 count) 'list)))
@@ -702,7 +732,8 @@ reconnecting browser never shares its node with the session it replaces."
   "Run one browser's session on REQUEST's upgraded connection: read its hello, make it a
 node, answer with the node's name, and serve its runtime until the browser goes. The node
 stops with the session."
-  (let* ((stream (dashboard-agent-websocket request))
+  (let* ((client (browser-join-client-address acceptor request))
+         (stream (dashboard-agent-websocket request))
          (session (%make-browser-session stream))
          (host (browser-join-nodes acceptor))
          (name nil))
@@ -713,7 +744,12 @@ stops with the session."
                  (unless (and (hash-table-p hello) (equal "hello" (gethash "op" hello)))
                    (error "a browser node must say hello first"))
                  (multiple-value-bind (identity zone) (browser-node-identity session stream hello)
+                   (let ((refusal (browser-join-refusal acceptor identity client)))
+                     (when refusal
+                       (browser-session-send session (core-object "op" "refused" "reason" refusal))
+                       (error "refused ~A from ~A: ~A" identity client refusal)))
                    (fence-browser-node acceptor identity)
+                   (setf (gethash identity (browser-join-clients acceptor)) client)
                    (setf name identity
                          (browser-session-epoch session)
                          (setf (gethash name (browser-join-epochs acceptor))
@@ -776,6 +812,7 @@ stops with the session."
              (format *error-output* "gr8s browser node~@[ ~A~]: ~A~%" name condition)))
       (when (and name (eq session (gethash name (browser-join-sessions acceptor))))
         (remhash name (browser-join-sessions acceptor))
+        (remhash name (browser-join-clients acceptor))
         (remhash name (browser-join-holdings acceptor)))
       (when name
         (let ((runtime (gethash name (browser-join-runtimes acceptor))))
@@ -944,12 +981,15 @@ process hosts none."
                                 for value = (gethash field pod)
                                 when (realp value) collect (list labels value)))))))))))
 
-(defun start-browser-join-listener (nodes address port &key distro pod-proxy pod-network images)
+(defun start-browser-join-listener (nodes address port &key distro pod-proxy pod-network images
+                                                             (max-nodes 64) (max-per-client 4))
   "Listen on ADDRESS:PORT for browsers joining as nodes on NODES, serving the join page and
 DISTRO, the root image file Pods boot from, and with POD-PROXY, HTTP to their Pods. With
-POD-NETWORK, their Pods join the cluster network through this host. Returns the acceptor."
+POD-NETWORK, their Pods join the cluster network through this host. At most MAX-NODES are
+connected at once, MAX-PER-CLIENT of them from one address. Returns the acceptor."
   (let ((acceptor (make-instance 'browser-join-acceptor
                                     :address address :port port :nodes nodes :pod-proxy pod-proxy
+                                    :max-nodes max-nodes :max-per-client max-per-client
                                     :pod-network pod-network
                                     :images (and images (make-browser-images images))
                                     :distro (and distro (pathname distro))
