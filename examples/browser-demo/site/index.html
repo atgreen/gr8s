@@ -78,6 +78,7 @@
   ul.points li { margin: 6px 0; }
   ul.points b { color: var(--fg); font-weight: 600; }
   footer { margin-top: 36px; font-size: 14px; color: var(--faint); text-align: center; }
+  .card.wide { grid-column: 1 / -1; }
 </style>
 </head>
 <body>
@@ -253,6 +254,11 @@
       <div class="card"><h3>ARM64 programs, JIT-compiled to WebAssembly</h3><p>The image's programs are unmodified
         ARM64 binaries. An ARM64 CPU built into that kernel runs them. It compiles their hot code to WebAssembly
         as they run. So the nginx that serves you a page is the same binary that is in the image.</p></div>
+      <div class="card wide"><h3>Your GPU, passed through the browser</h3><p>If your browser offers WebGPU on a real
+        GPU, the tab offers it to the cluster: its node gets a <code>gr8s.io/gpu</code> resource, labelled with the
+        GPU's vendor and architecture. A Pod that asks for <code>gr8s.io/gpu: 1</code> lands on a tab with one and gets
+        a Vulkan device inside its Linux VM, which draws through WebGPU on your GPU. Ordinary Vulkan programs run
+        unchanged.</p></div>
     </div>
   </section>
 
