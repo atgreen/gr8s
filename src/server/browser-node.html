@@ -34,7 +34,6 @@
   .pill.ready .dot { background: var(--ok); box-shadow: 0 0 0 4px var(--ok-soft); animation: pulse 2s infinite; }
   .pill.joining .dot { background: var(--warn); }
   .pill.gone .dot { background: var(--bad); }
-  .pill.idle .dot { background: var(--muted); }
   @keyframes pulse { 50% { box-shadow: 0 0 0 7px transparent; } }
   .hero { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 24px; box-shadow: var(--shadow);
           display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: center; }
@@ -312,23 +311,11 @@
     }
   }
 
-  // A tab joins when its visitor asks, so a link can't make someone a node just by opening
-  // this page (podster-zar9). Once joined, its reloads (the one after an upgrade, too)
-  // rejoin by themselves for as long as the tab stays open.
-  const JOINED = "gr8s-joined";
-  function remember(joined) {
-    try { if (joined) sessionStorage.setItem(JOINED, "1"); else sessionStorage.removeItem(JOINED); } catch {}
-  }
-  function remembered() {
-    try { return sessionStorage.getItem(JOINED) === "1"; } catch { return false; }
-  }
-
   function gone() {
-    remember(false);
     setState("gone", "Disconnected");
-    log("left the cluster");
+    log("left the cluster; reload to join again");
     $("leave").textContent = "Join again";
-    $("leave").onclick = () => { remember(true); location.reload(); };
+    $("leave").onclick = () => location.reload();
   }
 
   async function join() {
@@ -350,27 +337,17 @@
     });
     $("leave").onclick = () => { leaving = true; node.close(); };
     const name = await node.node;
-    remember(true);
     $("node").textContent = name;
     log(`this tab is node ${name}`);
     await node.closed;
     if (leaving) gone(); else await rejoinWhenBack();
   }
-  function start() {
-    join().catch((error) => {
-      log(String(error?.message ?? error));
-      // Joined nothing, but the cluster may only be restarting: try again unless it refused.
-      if (tab && error?.refused === false && !leaving) rejoinWhenBack();
-      else setState("gone", "Couldn't join");
-    });
-  }
-  if (remembered()) start();
-  else {
-    setState("idle", "Not joined");
-    log("join the cluster to make this tab a node; closing the tab leaves it");
-    $("leave").textContent = "Join the cluster";
-    $("leave").onclick = () => { $("leave").onclick = null; $("leave").textContent = "Leave the cluster"; start(); };
-  }
+  join().catch((error) => {
+    log(String(error?.message ?? error));
+    // Joined nothing, but the cluster may only be restarting: try again unless it refused.
+    if (tab && error?.refused === false && !leaving) rejoinWhenBack();
+    else setState("gone", "Couldn't join");
+  });
 </script>
 </body>
 </html>

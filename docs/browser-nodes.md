@@ -36,9 +36,7 @@ addresses through a TAP device on the serving host, which needs
 `CAP_NET_ADMIN`. Without it, browser nodes still run Pods, but the Pods have no
 network address.
 
-A tab joins only when its visitor clicks **Join the cluster**; after that, its
-reloads rejoin by themselves while the tab stays open. Other sites can't make their
-visitors nodes: the join page refuses to be framed, and its WebSocket accepts only
+Other sites can't make their visitors nodes: the join page refuses to be framed, and its WebSocket accepts only
 the join page's own origin (clients that aren't browsers send none, and are let in).
 
 A browser past the limits is told why on the join page and doesn't join. The
@@ -159,7 +157,7 @@ memory, the GPU is what the browser says it has.
 
 ## Upgrades and restarts
 
-When the server restarts, every tab's session ends. A joined tab the visitor didn't
+When the server restarts, every tab's session ends. A tab the visitor didn't
 leave waits for the server to answer again and reloads itself, rejoining under
 the same name; its Pods are started again. The join page is never cached, and it
 loads the tab's code at a URL naming its hash, so after an upgrade every tab runs

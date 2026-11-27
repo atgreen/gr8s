@@ -19,9 +19,7 @@ the Kubernetes API version with a gr8s release suffix (see
   passed with no NetworkPolicy or source-address check; and without a policy in
   place, IPv4 wasn't checked for its source either.
 - Another site can't make its visitors browser nodes (podster-zar9): the join page
-  can't be framed, its WebSocket accepts only the join page's own origin, and a tab
-  joins when its visitor clicks **Join the cluster** (its reloads then rejoin by
-  themselves).
+  can't be framed, and its WebSocket accepts only the join page's own origin.
 
 ### Fixed
 
