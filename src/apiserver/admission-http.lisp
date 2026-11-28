@@ -241,6 +241,7 @@ A client's own stale resourceVersion still fails, in the preview of the next att
 
 (defun admit-core-delete (store resource namespace name options dry-run)
   "Offer the deletion of one stored object to the webhooks."
+  (gr8s.resources::admit-gr8-user-cluster-delete store resource name gr8s.resources::*authenticated-api-identity*)
   (let ((attributes (admission-attributes-for store "DELETE" resource namespace name
                                               :options (admission-delete-options options) :dry-run dry-run)))
     (when (admission-active-p store attributes)
@@ -339,6 +340,7 @@ Returns the attributes as a second value for the validating step."
 (defun admit-pod-result (store attributes pod)
   "Run the validating webhooks over the final POD, assigning a generated name first."
   (admit-pod-security store attributes (copy-core-object (pod-to-object pod)))
+  (gr8s.resources::admit-gr8-namespace-pod store (admission-namespace attributes) (pod-to-object pod))
   (if (admission-active-p store attributes)
       (progn
         (with-store-lock (store) (assign-generated-pod-name-unlocked store pod))

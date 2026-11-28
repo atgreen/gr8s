@@ -238,6 +238,9 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
       (error "CPU and topology policies require managed containerd")))
   options)
 
+(defparameter +gr8-user-socket-default+ "/run/gr8s/gr8.sock"
+  "Where serve gives local users gr8 without sudo (podster-7uof).")
+
 (defun parse-serve-options (arguments)
   "Parse `gr8s serve' ARGUMENTS into an options plist on top of the serve
    defaults. Signals on an unknown option, a missing option value, or an out-of-
@@ -282,6 +285,8 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                        :dns-forward-rules nil
                        :dns-serve-zones nil
                        :kubeconfig nil
+                       :gr8-socket +gr8-user-socket-default+
+                       :gr8-users nil
                        :kubelet-port +kubelet-default-port+
                        :local-storage-path +default-local-storage-path+)))
     (loop while arguments
@@ -475,6 +480,11 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                             (add-dns-serve-zone (getf options :dns-serve-zones) value)))
                      ((string= option "--kubeconfig")
                       (setf (getf options :kubeconfig) value))
+                     ;; podster-7uof: where local users get gr8 without sudo, "" for nowhere.
+                     ((string= option "--gr8-socket")
+                      (setf (getf options :gr8-socket) (if (equal value "") nil value)))
+                     ((string= option "--gr8-users")
+                      (setf (getf options :gr8-users) value))
                      ((string= option "--kubelet-port")
                       (setf (getf options :kubelet-port) (if (equal value "0") 0 (parse-port value))))
                      ;; podster-cm3: the Pod interface MTU handed to every node.
@@ -2394,13 +2404,13 @@ needs no shell/coreutils/util-linux. Returns 0."
     (ag-grpc:base64-encode octets)))
 
 (defun print-kubeconfig (stream server-url &key ca-certificate ca-certificates
-                                             client-certificate client-key)
+                                             client-certificate client-key (namespace "default"))
   "Write an authenticated gr8s administrative kubeconfig to STREAM."
   (unless (and (or ca-certificate ca-certificates) client-certificate client-key)
     (error "a CA certificate, client certificate, and client key are required"))
   (format stream
-          "apiVersion: v1~%kind: Config~%clusters:~%  - name: gr8s~%    cluster:~%      certificate-authority-data: ~A~%      server: ~A~%contexts:~%  - name: gr8s~%    context:~%      cluster: gr8s~%      namespace: default~%      user: gr8s~%current-context: gr8s~%users:~%  - name: gr8s~%    user:~%      client-certificate-data: ~A~%      client-key-data: ~A~%"
-          (kubeconfig-ca-data ca-certificate ca-certificates) server-url
+          "apiVersion: v1~%kind: Config~%clusters:~%  - name: gr8s~%    cluster:~%      certificate-authority-data: ~A~%      server: ~A~%contexts:~%  - name: gr8s~%    context:~%      cluster: gr8s~%      namespace: ~A~%      user: gr8s~%current-context: gr8s~%users:~%  - name: gr8s~%    user:~%      client-certificate-data: ~A~%      client-key-data: ~A~%"
+          (kubeconfig-ca-data ca-certificate ca-certificates) server-url namespace
           (ag-grpc:base64-encode (pure-tls::read-file-bytes client-certificate))
           (ag-grpc:base64-encode (pure-tls::read-file-bytes client-key))))
 
@@ -3673,10 +3683,25 @@ between later ones. An ordinary restart recovers within the first.")
                          :client-certificate admin-certificate :client-key admin-key
                          :private (null (getf options :kubeconfig))))
                       (format t "gr8s kubeconfig: ~A~%" (namestring kubeconfig)))
-                    (format t "gr8s listening on https://~A:~D~%" address port)
-                    (finish-output)
-                    (notify-service-manager-ready)
-                    (loop until *shutdown-requested* do (sleep 0.1)))
+                    ;; Only root may issue credentials from the cluster's CA.
+                    (let ((gr8-socket
+                            (when (and (getf options :gr8-socket) (zerop (sb-posix:geteuid)))
+                              (handler-case
+                                  (start-gr8-user-socket
+                                   (getf options :gr8-socket) store pki
+                                   (format nil "https://~A:~D" (serve-local-kubeconfig-address options) port)
+                                   :users-group (getf options :gr8-users))
+                                (error (condition)
+                                  (format *error-output* "gr8s: no gr8 user socket at ~A: ~A~%"
+                                          (getf options :gr8-socket) condition)
+                                  nil)))))
+                      (unwind-protect
+                           (progn
+                             (format t "gr8s listening on https://~A:~D~%" address port)
+                             (finish-output)
+                             (notify-service-manager-ready)
+                             (loop until *shutdown-requested* do (sleep 0.1)))
+                        (when gr8-socket (stop-gr8-user-socket gr8-socket)))))
                (when debug-port (stop-debug-server debug-port))
                (when aggregator (stop-api-aggregator aggregator))
                (when worker (stop-reconciliation-worker worker))
@@ -4525,6 +4550,8 @@ No HA API may start from member-local certificate state before this converges."
                         ("--listen IPV4" "API listen address") ("--port PORT" "API port")
                         ("--node-port PORT" "Agent supervisor port") ("--node-name NAME" "Node name")
                         ("--disable-agent" "Run only the control plane")
+                        ("--gr8-socket PATH" "Where local users get gr8 without sudo (default /run/gr8s/gr8.sock; \"\" for nowhere)")
+                        ("--gr8-users GROUP" "Give gr8 only to GROUP's members (default: every local user)")
                         ("--node-max-connections N" "Accept at most N node connections at once (default 512): one per node, and per browser node this server hosts")
                         ("--browser-listen HOST:PORT" "Serve the browser-node join page and sessions there (podster-57fv)")
                         ("--browser-distro FILE" "The root image (erofs) browser nodes boot Pods from")

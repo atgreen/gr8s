@@ -83,12 +83,14 @@ func RunSecurityProfile(namespace, pod string, credentials []PolicyCredential, e
 }
 
 // RunSandboxProfile is the SandboxProfile carrying a policy's egress block for the
-// run of command in the Pod named pod alone; the node prefers it to any other.
-func RunSandboxProfile(pod, command string, egress map[string]any) map[string]any {
+// run of command in the Pod named pod in namespace alone; the node prefers it to any
+// other. It names its namespace, as the server requires of a gr8 user's (podster-tcr8).
+func RunSandboxProfile(namespace, pod, command string, egress map[string]any) map[string]any {
 	return map[string]any{
 		"apiVersion": "gr8.gr8s.io/v1alpha1", "kind": "SandboxProfile",
 		"metadata": map[string]any{"name": pod, "labels": map[string]any{LabelManagedBy: "gr8", LabelRun: pod}},
-		"spec":     map[string]any{"commands": []any{command}, "run": pod, "egress": egress},
+		"spec": map[string]any{"commands": []any{command}, "run": pod, "egress": egress,
+			"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": namespace}}},
 	}
 }
 

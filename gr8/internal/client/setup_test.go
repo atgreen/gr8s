@@ -4,89 +4,64 @@
 package client
 
 import (
+	"bytes"
+	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
-	"slices"
+	"strings"
 	"testing"
-
-	rbacv1 "k8s.io/api/rbac/v1"
 )
 
-func allows(rules []rbacv1.PolicyRule, group, resource, verb string) bool {
-	for _, rule := range rules {
-		if slices.Contains(rule.APIGroups, group) && slices.Contains(rule.Resources, resource) &&
-			slices.Contains(rule.Verbs, verb) {
-			return true
-		}
-	}
-	return false
+// APICall is one kind of request gr8 makes; namespaced ones go to the user's own
+// namespace.
+type APICall struct {
+	Group      string `json:"group"`
+	Resource   string `json:"resource"`
+	Verb       string `json:"verb"`
+	Namespaced bool   `json:"namespaced"`
 }
 
-// Every API call gr8 makes, so a new one without a grant fails here, not on a desktop.
-func TestSetupRBACGrantsWhatGr8CallsAndNoMore(t *testing.T) {
-	role, binding, clusterRole, clusterBinding := SetupRBAC("gr8:alice", "gr8-alice")
-	namespaced := map[[2]string][]string{
-		{"", "pods"}:                             {"create", "get", "delete"},
-		{"", "pods/exec"}:                        {"create", "get"},
-		{"", "secrets"}:                          {"create", "get", "update", "patch", "delete"},
-		{"agents.kruise.io", "securityprofiles"}: {"create", "get", "update", "patch", "delete"},
-	}
-	cluster := map[[2]string][]string{
-		{"", "nodes"}:                      {"get", "list"},
-		{"", "namespaces"}:                 {"get"},
-		{"gr8.gr8s.io", "sandboxprofiles"}: {"create", "get", "list", "update", "delete"},
-		{"policy.networking.k8s.io", "clusternetworkpolicies"}: {"create", "delete"},
-	}
-	for key, verbs := range namespaced {
+// gr8Calls is every API call gr8 makes. The gr8s suite checks gr8s-server's grant to
+// a gr8 user against it (tests/fixtures/gr8-api-calls.json), so a call added here
+// without a grant there fails CI rather than on a desktop.
+var gr8Calls = func() []APICall {
+	var calls []APICall
+	add := func(group, resource string, namespaced bool, verbs ...string) {
 		for _, verb := range verbs {
-			if !allows(role.Rules, key[0], key[1], verb) {
-				t.Errorf("the gr8 namespace Role does not allow %s %s/%s", verb, key[0], key[1])
-			}
+			calls = append(calls, APICall{group, resource, verb, namespaced})
 		}
 	}
-	for key, verbs := range cluster {
-		for _, verb := range verbs {
-			if !allows(clusterRole.Rules, key[0], key[1], verb) {
-				t.Errorf("the ClusterRole does not allow %s %s/%s", verb, key[0], key[1])
-			}
+	add("", "pods", true, "create", "get", "delete")
+	add("", "pods/exec", true, "create", "get")
+	add("", "secrets", true, "create", "get", "update", "patch", "delete")
+	add("agents.kruise.io", "securityprofiles", true, "create", "get", "update", "patch", "delete")
+	add("", "nodes", false, "get", "list")
+	add("", "namespaces", false, "get")
+	add("gr8.gr8s.io", "sandboxprofiles", false, "create", "get", "list", "update", "delete")
+	add("policy.networking.k8s.io", "clusternetworkpolicies", false, "create", "delete")
+	return calls
+}()
+
+var gr8CallsFixture = filepath.Join("..", "..", "..", "tests", "fixtures", "gr8-api-calls.json")
+
+func TestTheAPICallsFixtureIsGr8s(t *testing.T) {
+	raw, err := json.MarshalIndent(gr8Calls, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, '\n')
+	if os.Getenv("GR8_UPDATE_FIXTURES") == "1" {
+		if err := os.WriteFile(gr8CallsFixture, raw, 0o644); err != nil {
+			t.Fatal(err)
 		}
 	}
-	// Nothing broader: no wildcards, no Pods or Secrets beyond the namespace, no
-	// namespaces made, and no RBAC of its own.
-	for _, rule := range append(slices.Clone(role.Rules), clusterRole.Rules...) {
-		for _, list := range [][]string{rule.APIGroups, rule.Resources, rule.Verbs} {
-			if slices.Contains(list, "*") {
-				t.Errorf("rule %v has a wildcard", rule)
-			}
-		}
-		if slices.Contains(rule.APIGroups, rbacv1.GroupName) {
-			t.Errorf("rule %v grants RBAC", rule)
-		}
+	fixture, err := os.ReadFile(gr8CallsFixture)
+	if err != nil {
+		t.Fatalf("%v (GR8_UPDATE_FIXTURES=1 go test ./... writes it)", err)
 	}
-	for _, resource := range []string{"pods", "secrets"} {
-		if allows(clusterRole.Rules, "", resource, "get") {
-			t.Errorf("the ClusterRole grants %s in every namespace", resource)
-		}
-	}
-	if allows(clusterRole.Rules, "", "namespaces", "create") {
-		t.Error("the ClusterRole lets the user create namespaces")
-	}
-	// The one namespace the user may read is their own.
-	for _, rule := range clusterRole.Rules {
-		if slices.Contains(rule.Resources, "namespaces") && !slices.Equal(rule.ResourceNames, []string{"gr8-alice"}) {
-			t.Errorf("namespaces granted beyond gr8-alice: %v", rule)
-		}
-	}
-	if role.Namespace != "gr8-alice" || binding.Namespace != "gr8-alice" {
-		t.Errorf("Role and RoleBinding in %q, %q", role.Namespace, binding.Namespace)
-	}
-	for _, subjects := range [][]rbacv1.Subject{binding.Subjects, clusterBinding.Subjects} {
-		if len(subjects) != 1 || subjects[0].Kind != rbacv1.UserKind || subjects[0].Name != "gr8:alice" {
-			t.Errorf("bound to %v, want only user gr8:alice", subjects)
-		}
-	}
-	if binding.RoleRef.Name != role.Name || clusterBinding.RoleRef.Name != clusterRole.Name {
-		t.Error("a binding refers to another role")
+	if !bytes.Equal(fixture, raw) {
+		t.Errorf("%s is not gr8's calls any more; rerun with GR8_UPDATE_FIXTURES=1 and check the gr8s suite", gr8CallsFixture)
 	}
 }
 
@@ -131,28 +106,6 @@ func TestDefaultKubeconfigPrefersWhatSetupWrote(t *testing.T) {
 	}
 }
 
-func TestServerStateDirectoryFollowsServerEnv(t *testing.T) {
-	for environment, want := range map[string]string{
-		"": "/var/lib/gr8s/server",
-		"GR8S_EXEC_ARGS=serve --state-directory /var/lib/gr8s/server\n":            "/var/lib/gr8s/server",
-		"# note\nGR8S_EXEC_ARGS=\"serve --port 6443 --state-directory /srv/gr8s\"": "/srv/gr8s",
-		"GR8S_EXEC_ARGS=serve --state-directory=/data/gr8s":                        "/data/gr8s",
-	} {
-		if got := ServerStateDirectory(environment); got != want {
-			t.Errorf("ServerStateDirectory(%q) = %q, want %q", environment, got, want)
-		}
-	}
-}
-
-func TestEachUserGetsANamespaceOfTheirOwn(t *testing.T) {
-	if UserNamespace("alice") == UserNamespace("bob") {
-		t.Error("two users share a namespace")
-	}
-	if got := UserNamespace("build_bot"); got != "gr8-build-bot" {
-		t.Errorf("UserNamespace(build_bot) = %q, want a valid namespace name", got)
-	}
-}
-
 const issuedKubeconfig = `apiVersion: v1
 kind: Config
 clusters:
@@ -163,7 +116,7 @@ contexts:
   - name: gr8s
     context:
       cluster: gr8s
-      namespace: default
+      namespace: NAMESPACE
       user: gr8s
 current-context: gr8s
 users:
@@ -172,25 +125,44 @@ users:
       token: t
 `
 
-func TestTheUsersKubeconfigNamesTheirNamespaceAndGr8FollowsIt(t *testing.T) {
-	written, err := WithNamespace([]byte(issuedKubeconfig), "gr8-alice")
+func TestGr8FollowsTheNamespaceItsKubeconfigNames(t *testing.T) {
+	directory := t.TempDir()
+	for namespace, want := range map[string]string{"gr8-alice": "gr8-alice", "gr8": "gr8", "default": "gr8"} {
+		path := filepath.Join(directory, namespace)
+		if err := os.WriteFile(path, []byte(strings.Replace(issuedKubeconfig, "NAMESPACE", namespace, 1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := DefaultNamespace(path); got != want {
+			t.Errorf("a kubeconfig naming %s: DefaultNamespace = %q, want %q", namespace, got, want)
+		}
+	}
+}
+
+func TestSetupAsksTheServerAndPassesOnWhyNot(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "gr8.sock")
+	if ServerRunning(socket) {
+		t.Fatal("nothing listens yet")
+	}
+	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	directory := t.TempDir()
-	path := filepath.Join(directory, "kubeconfig")
-	if err := os.WriteFile(path, written, 0o600); err != nil {
-		t.Fatal(err)
+	defer listener.Close()
+	replies := []string{`{"kubeconfig":"apiVersion: v1\n"}`, `{"error":"alice is not in group gr8"}`}
+	go func() {
+		for _, reply := range replies {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = connection.Write([]byte(reply))
+			connection.Close()
+		}
+	}()
+	if kubeconfig, err := AskForKubeconfig(socket); err != nil || string(kubeconfig) != "apiVersion: v1\n" {
+		t.Errorf("AskForKubeconfig = %q, %v", kubeconfig, err)
 	}
-	if got := DefaultNamespace(path); got != "gr8-alice" {
-		t.Errorf("DefaultNamespace(setup's kubeconfig) = %q, want gr8-alice", got)
-	}
-	// An administrator's kubeconfig names default: gr8 keeps to its own namespace.
-	admin := filepath.Join(directory, "admin")
-	if err := os.WriteFile(admin, []byte(issuedKubeconfig), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := DefaultNamespace(admin); got != "gr8" {
-		t.Errorf("DefaultNamespace(admin kubeconfig) = %q, want gr8", got)
+	if _, err := AskForKubeconfig(socket); err == nil || !strings.Contains(err.Error(), "not in group gr8") {
+		t.Errorf("a refusal came back as %v", err)
 	}
 }

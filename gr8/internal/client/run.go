@@ -173,7 +173,7 @@ func Run(options Options) (int, error) {
 		adoptPolicyCredentials(ctx, clientset, pod, credentials, profile)
 		if egress := policy.Spec.egressJSON(); egress != nil {
 			if err := postObject(ctx, clientset, sandboxProfiles,
-				RunSandboxProfile(pod.Name, filepath.Base(options.Command[0]), egress), "the SandboxProfile"); err != nil {
+				RunSandboxProfile(pod.Namespace, pod.Name, filepath.Base(options.Command[0]), egress), "the SandboxProfile"); err != nil {
 				return 0, err
 			}
 			if !options.Keep {

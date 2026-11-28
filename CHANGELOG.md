@@ -9,6 +9,14 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Security
 
+- gr8 users on one machine are kept apart (podster-tcr8). A Pod in a namespace gr8
+  --setup made must run as its owner's UID and groups, may not escalate privilege,
+  drops all capabilities, and uses no host namespaces, host ports or other sysctls;
+  gr8's namespaces admit privileged Pods (the host's `/` is mounted), so before this
+  anyone who could create a Pod in one could become root on the node. A `gr8:` user
+  may make a ClusterNetworkPolicy or SandboxProfile only for their own namespace's
+  Pods. gr8's sandbox container now sets `allowPrivilegeEscalation: false` and drops
+  all capabilities, and its run SandboxProfiles name their namespace.
 - Streaming into a Pod over a WebSocket (exec, attach and port-forward as a GET) needs
   `get` as well as `create` on the subresource, as upstream requires
   (AuthorizePodWebsocketUpgradeCreatePermission, GA in 1.38; podster-i18c.3). gr8s
@@ -120,14 +128,19 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- A local user gets gr8 without sudo (podster-7uof). `gr8s-server` listens on
+  `/run/gr8s/gr8.sock`, knows who connects from the kernel (`SO_PEERCRED`), and
+  answers with their own kubeconfig, after making their namespace and grant. gr8
+  asks it on first run; sudo is needed only to start `gr8s-server` on a machine
+  where it isn't running. Root and system accounts are refused; `--gr8-users
+  GROUP` limits it to a group, and `--gr8-socket ""` turns it off.
 - `gr8 --setup` makes a fresh machine a gr8s node for the desktop user, and gr8
   offers it on a terminal when it finds no kubeconfig (podster-q35k). One sudo
   starts `gr8s-server`, waits for the node, makes the user a namespace of their
   own (`gr8-USER`), and grants them only what gr8 needs there; their kubeconfig,
   at `~/.config/gr8/kubeconfig`, carries a client certificate of its own, never
   the administrator's. `gr8s kubeconfig --user NAME` issues such a certificate.
-  The grant is still root-equivalent until the server ties gr8 Pods to their
-  owner's UID (podster-tcr8), so setup is for users who already have sudo.
+  Setup itself runs sudo.
 - StatefulSet `updateStrategy: Recreate`, for Kubernetes 1.38 (podster-i18c.5): every
   old-revision Pod is deleted, and no new-revision Pod is made until none is left, so
   the two never run at once; the `Progressing` condition reports `RecreateInProgress`
