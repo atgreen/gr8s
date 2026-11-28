@@ -157,7 +157,9 @@ ordinary Slynk protocol bytes suitable for an opaque tunnel."
 
 (defun debug-eval (text)
   "Evaluate one form from TEXT in this package, returning its printed output and value.
-Errors come back as text with a backtrace, so a client never lands in a debugger."
+Errors come back as text with a backtrace, so a client never lands in a debugger. It is
+reached only through the authenticated Slynk debug tunnel, which already evaluates
+anything; this only shapes the answer as text for scripted clients."
   (let ((*package* (find-package '#:gr8s.apiserver)))
     (with-output-to-string (*standard-output*)
       (block evaluation
@@ -166,7 +168,8 @@ Errors come back as text with a backtrace, so a client never lands in a debugger
                       (format t "ERROR: ~A~%" condition)
                       (sb-debug:print-backtrace :count 30 :stream *standard-output*)
                       (return-from evaluation))))
-          (format t "~{~S~%~}" (multiple-value-list (eval (read-from-string text)))))))))
+          ;; A debug REPL's whole job is to evaluate what its authenticated client sends.
+          (format t "~{~S~%~}" (multiple-value-list (eval (read-from-string text)))))))))  ; lint:suppress eval-usage
 
 (defun debug-threads ()
   "Return the name of every live thread."

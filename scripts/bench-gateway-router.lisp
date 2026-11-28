@@ -20,7 +20,8 @@
                                              gw-candidate-clause compile-gateway-router)))
               do (when (eq (second form) 'compile-gateway-router)
                    (setf (second form) 'benchmark-jit-gateway-router))
-                 (eval form)))))
+                 ;; Load the baseline router's definitions, read from its file, to time against.
+                 (eval form)))))  ; lint:suppress eval-usage
 
 (defun bench-router-workload (layout count)
   (loop for i below count
