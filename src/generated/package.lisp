@@ -24,6 +24,9 @@
 (defpackage #:gr8s.deviceplugin.v1beta1
   (:use #:cl))
 
+(defpackage #:gr8s.kms.v2
+  (:use #:cl))
+
 (defpackage #:gr8s.podresources.v1
   (:use #:cl))
 

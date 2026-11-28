@@ -4,6 +4,13 @@
 ;;;; Authenticated encryption for Kubernetes Secret data at every durable and
 ;;;; replicated store boundary.  Live resource objects remain ordinary
 ;;;; Kubernetes objects; only their serialized representation is enveloped.
+;;;;
+;;;; Each Secret is sealed with AES-GCM under its key record's data key. A record's
+;;;; data key is derived from the cluster CA key and the record's salt, or, for a
+;;;; KMS v2 record (podster-qyp9), is a random key that a KMS plugin wraps: the record
+;;;; holds only the wrapped key, each server unwraps it with its own plugin once and
+;;;; keeps it in memory, and the key that wraps it never leaves the KMS. HA members
+;;;; replicate the record and reach the same KMS, so no key passes between them.
 
 (in-package #:gr8s.resources)
 
@@ -29,6 +36,53 @@
   (find key-id (gethash "keys" config #()) :test #'equal
         :key (lambda (record) (gethash "id" record))))
 
+(defvar *kms-plugins* (make-hash-table :test #'equal :synchronized t)
+  "The KMS v2 plugins this process was given (serve's --kms-plugin), by name.")
+
+(defvar *kms-data-keys* (make-hash-table :test #'equal :synchronized t)
+  "Data keys KMS plugins unwrapped, by key record id: unwrapped once, kept in memory.")
+
+(defun register-kms-plugin (plugin)
+  (setf (gethash (gr8s.protocol::kms-plugin-name plugin) *kms-plugins*) plugin))
+
+(defun kms-plugin-named (name)
+  (or (gethash name *kms-plugins*)
+      (error "Secrets are encrypted with a key of KMS plugin ~A, which this server wasn't given (--kms-plugin ~A=ENDPOINT)"
+             name name)))
+
+(defun kms-key-record-p (record)
+  (equal "kms-v2" (gethash "provider" record)))
+
+(defun new-kms-key-record (name)
+  "A key record whose data key, fresh and random, plugin NAME wraps."
+  (let ((plugin (kms-plugin-named name))
+        (key (ironclad:random-data 32))
+        (uid (subseq (ironclad:byte-array-to-hex-string (ironclad:random-data 16)) 0 32)))
+    (multiple-value-bind (wrapped key-id annotations) (gr8s.protocol::kms-plugin-encrypt plugin key uid)
+      (let ((id (subseq (ironclad:byte-array-to-hex-string (ironclad:digest-sequence :sha256 wrapped)) 0 16))
+            (stored (make-hash-table :test #'equal)))
+        (loop for (annotation . value) in annotations
+              do (setf (gethash annotation stored) (ag-grpc:base64-encode value)))
+        (setf (gethash id *kms-data-keys*) key)
+        (secret-json-object "id" id "provider" "kms-v2" "kmsName" name "kmsKeyId" key-id
+                            "wrappedKey" (ag-grpc:base64-encode wrapped) "annotations" stored)))))
+
+(defun kms-record-data-key (record)
+  "RECORD's data key, unwrapped by its plugin the first time it is needed."
+  (let ((id (gethash "id" record)))
+    (or (gethash id *kms-data-keys*)
+        (let* ((annotations (loop for name being the hash-keys of (gethash "annotations" record (make-hash-table))
+                                    using (hash-value value)
+                                  collect (cons name (ag-grpc:base64-decode value))))
+               (key (gr8s.protocol::kms-plugin-decrypt
+                     (kms-plugin-named (gethash "kmsName" record))
+                     (ag-grpc:base64-decode (gethash "wrappedKey" record))
+                     (concatenate 'string "gr8s-" id) (gethash "kmsKeyId" record) annotations)))
+          (unless (= 32 (length key))
+            (error "KMS plugin ~A unwrapped Secret key ~A to ~D bytes, not 32"
+                   (gethash "kmsName" record) id (length key)))
+          (setf (gethash id *kms-data-keys*) key)))))
+
 (defun secret-encryption-ca-key-bytes (store)
   (let ((path (merge-pathnames "pki/cluster-ca.key" (pod-store-path store))))
     (unless (probe-file path)
@@ -42,6 +96,8 @@
     (return-from derive-secret-encryption-key
       (or (gethash record (snapshot-secret-keys-records *snapshot-secret-keys*))
           (error "Secret key was not pinned at snapshot capture"))))
+  (when (kms-key-record-p record)
+    (return-from derive-secret-encryption-key (kms-record-data-key record)))
   (let ((hmac (ironclad:make-hmac (secret-encryption-ca-key-bytes store) :sha256)))
     (ironclad:update-hmac
      hmac
@@ -166,15 +222,14 @@ Do not retain a second transformed vector of payloads during checkpoint load."
       (setf (aref history i) (decrypt-secret-history-entry store (aref history i)))))
   state)
 
-(defun new-secret-encryption-config ()
-  (let* ((salt (ironclad:random-data 32))
-         (id (subseq (ironclad:byte-array-to-hex-string
-                      (ironclad:digest-sequence :sha256 salt)) 0 16)))
+(defun new-secret-encryption-config (&optional kms)
+  "A new configuration whose one key is derived from cluster identity, or wrapped by KMS
+plugin KMS."
+  (let* ((record (if kms (new-kms-key-record kms) (new-secret-encryption-key-record)))
+         (id (gethash "id" record)))
     (secret-json-object
      "version" 1 "enabled" t "phase" "ready" "activeKeyId" id
-     "reencryptedKeyId" id
-     "keys" (vector (secret-json-object "id" id
-                                         "salt" (ag-grpc:base64-encode salt))))))
+     "reencryptedKeyId" id "keys" (vector record))))
 
 (defun rewrite-secret-encryption-checkpoint-unlocked (store config)
   (let ((token-key (or (pod-store-template-token-key store)
@@ -245,8 +300,9 @@ Do not retain a second transformed vector of payloads during checkpoint load."
                result))))
     (bt:with-lock-held ((pod-store-consensus-write-lock store)) (perform))))
 
-(defun enable-secret-encryption (store)
-  "Enable encryption and atomically rewrite all currently durable Secret data."
+(defun enable-secret-encryption (store &key kms)
+  "Enable encryption and atomically rewrite all currently durable Secret data, under a
+key derived from cluster identity, or one KMS plugin KMS wraps."
   ;; Secret encryption derives its KEK from the store-local cluster identity.
   ;; This is deliberately separate from the control-plane serving PKI rooted
   ;; below STATE/pki/.
@@ -256,7 +312,7 @@ Do not retain a second transformed vector of payloads during checkpoint load."
       (when (secret-encryption-enabled-p store)
         (return-from enable-secret-encryption
           (copy-core-object (pod-store-secret-encryption-config store)))))
-    (let ((config (new-secret-encryption-config)))
+    (let ((config (new-secret-encryption-config kms)))
       (commit-secret-encryption-command store "rewrite" config)
       config)))
 
@@ -286,13 +342,14 @@ Do not retain a second transformed vector of payloads during checkpoint load."
                       (ironclad:digest-sequence :sha256 salt)) 0 16)))
     (secret-json-object "id" id "salt" (ag-grpc:base64-encode salt))))
 
-(defun prepare-secret-encryption-key (store)
+(defun prepare-secret-encryption-key (store &key kms)
+  "Add a key, derived from cluster identity or wrapped by KMS plugin KMS, for promotion."
   (call-with-secret-encryption-update
    store
    (lambda (config)
      (when (gethash "preparedKeyId" config)
        (error "A Secret encryption key is already prepared"))
-     (let* ((record (new-secret-encryption-key-record))
+     (let* ((record (if kms (new-kms-key-record kms) (new-secret-encryption-key-record)))
             (id (gethash "id" record)))
        (setf (gethash "keys" config)
              (concatenate 'vector (gethash "keys" config) (vector record))
@@ -332,3 +389,49 @@ Do not retain a second transformed vector of payloads during checkpoint load."
          (setf (gethash "keys" config) (vector record)
                (gethash "phase" config) "ready")
          (values config "metadata" active))))))
+
+(defun rotate-kms-secret-key (store)
+  "When the active key is a KMS plugin's and the plugin now reports another key_id, as
+when its key rotates, wrap a fresh data key with the new one and make that active, as
+kube-apiserver does (podster-qyp9). Secrets written before keep their key until
+reencrypt. Returns the new key's id, or NIL when nothing changed."
+  (let ((record (bt:with-lock-held ((pod-store-lock store))
+                  (and (secret-encryption-enabled-p store)
+                       (let ((config (pod-store-secret-encryption-config store)))
+                         (and (null (gethash "preparedKeyId" config))
+                              (copy-core-object
+                               (secret-encryption-key-record config (gethash "activeKeyId" config)))))))))
+    (when (and record (kms-key-record-p record))
+      (multiple-value-bind (healthy key-id why)
+          (gr8s.protocol::kms-plugin-status (kms-plugin-named (gethash "kmsName" record)))
+        (cond ((not healthy)
+               (format *error-output* "gr8s: KMS plugin ~A is unhealthy: ~A~%" (gethash "kmsName" record) why)
+               nil)
+              ((equal key-id (gethash "kmsKeyId" record)) nil)
+              (t (prepare-secret-encryption-key store :kms (gethash "kmsName" record))
+                 (promote-secret-encryption-key store)))))))
+
+(defun kms-plugins-health ()
+  "Each KMS plugin this process was given, as (name healthy-p why)."
+  (loop for name in (sort (loop for name being the hash-keys of *kms-plugins* collect name) #'string<)
+        collect (multiple-value-bind (healthy key-id why) (gr8s.protocol::kms-plugin-status (gethash name *kms-plugins*))
+                  (declare (ignore key-id))
+                  (list name healthy why))))
+
+(defvar *kms-plugin-health* (make-hash-table :test #'equal :synchronized t)
+  "Each KMS plugin's last check, by name: (healthy-p . why). Health checks read this
+rather than calling a plugin, so a slow one can't stall them.")
+
+(defun refresh-kms-plugin-health ()
+  (loop for (name healthy why) in (kms-plugins-health)
+        do (setf (gethash name *kms-plugin-health*) (cons healthy why))))
+
+(defun kms-providers-health ()
+  "(values configured-p healthy-p why): whether this server has KMS plugins, and whether
+each was healthy when last checked."
+  (if (zerop (hash-table-count *kms-plugins*))
+      (values nil t nil)
+      (loop for name being the hash-keys of *kms-plugins*
+            for (healthy . why) = (gethash name *kms-plugin-health* '(nil . "not checked yet"))
+            unless healthy return (values t nil (format nil "~A: ~A" name why))
+            finally (return (values t t nil)))))

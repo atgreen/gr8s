@@ -51,17 +51,75 @@ The resource store checkpoints data to `objects/state.json` and records followin
 commits in `objects/journal.jsonl`, beneath the selected application generation
 of the state directory. It records monotonic resource versions and survives
 server restarts. These files use mode `0600`. Without encryption enabled, Secret
-values are stored as base64. `gr8s secrets-encrypt` manages authenticated
-encryption at rest and key rotation. Encrypted data depends on the cluster CA
-private key, so backups must retain cluster identity as well as application data.
+values are stored as base64. With it, each Secret is sealed with AES-GCM under its
+key record's data key, which comes from one of two places:
+
+- **A KMS v2 plugin** (the upstream `k8s.io/kms` protocol over a Unix socket). The
+  data key is random; the plugin wraps it with a key it holds, and the store keeps
+  only the wrapped key. A server unwraps it once at start with its own plugin and
+  keeps it in memory, so the plugin is called rarely. Any KMS v2 plugin works: a cloud
+  KMS's, Vault or OpenBao Transit's, an HSM's, or `gr8s-kms`, below. HA members each
+  reach the same KMS, so no key passes between them.
+- **Cluster identity**: a key derived from the cluster CA private key and the record's
+  salt. Backups must then retain cluster identity as well as application data.
+
+Give `serve` a plugin with `--kms-plugin NAME=ENDPOINT` (repeatable). The API's
+`/healthz`, `/livez` and `/readyz` then report a `kms-providers` check, failing while
+a plugin is unhealthy, as upstream's does; gr8s checks each plugin every minute. When
+a plugin reports a new `key_id`, as after its key rotates, a standalone server or the
+HA leader wraps a fresh data key with it and writes Secrets with that from then on;
+older Secrets keep their key until `reencrypt`.
+
+### gr8s-kms, the bundled plugin
+
+The packages ship `gr8s-kms` and `gr8s-kms.service`. It keeps a ring of keys in
+`/var/lib/gr8s/kms/keyring.cred`, sealed with `systemd-creds`: to the TPM and the host
+key when the machine has a TPM, to the host key (`/var/lib/systemd/credential.secret`)
+otherwise. A copy of `/var/lib/gr8s` or a backup is then useless without this
+machine, and with a TPM so is a stolen disk. It doesn't protect a running machine
+from its root, who can read what gr8s holds in memory.
+
+```sh
+sudo gr8s-kms status                    # the active key and how the ring is sealed
+sudo gr8s-kms rotate                    # a new key wraps from now on
+sudo gr8s-kms export-recovery --file /mnt/usb/gr8s-kms.recovery
+sudo gr8s-kms import-recovery --file /mnt/usb/gr8s-kms.recovery
+```
+
+**Keep a recovery export.** A ring sealed to a TPM is gone with the machine. The
+export is the ring under a passphrase (scrypt, AES-GCM); on a replacement machine,
+`import-recovery` seals it there. The seal isn't bound to PCRs by default, so a
+firmware or Secure Boot change doesn't lose it; `--tpm2-pcrs` binds it if you want
+that. Without `systemd-creds`, `--unsealed` stores the ring root-only, and says so.
+
+### Encryption by default
+
+The packaged `/etc/gr8s/server.env` names `gr8s-kms` with `--kms-plugin
+gr8s=unix:///run/gr8s/kms.sock` and `--encrypt-secrets-with gr8s`: a new standalone
+cluster encrypts its Secrets with it from its first one, and won't start without it
+rather than write one in plaintext. An existing cluster, or one starting or joining
+HA, is left as it is; move one with `secrets-encrypt` (below).
+
+### Secrets in containers' environments
+
+A Secret given to a container as an env var is part of its OCI spec, which containerd
+keeps in two places on the node. Its state directory (`containerd/run`), each
+container's bundle, is now a tmpfs, as stock containerd keeps it under `/run`; on a
+node upgraded with Pods running it stays on disk, with a log line saying so, until its
+Pods are gone or it restarts. Its metadata database (`containerd/root/.../meta.db`)
+also records the spec, as upstream containerd's does, and must persist across
+restarts, so an env var's value is on the node's disk there for as long as the
+container exists. Mount Secrets as files instead: a Secret volume is a tmpfs, and its
+value is never written to the node's disk.
 
 ### Encryption-at-rest operations
 
-Secret encryption management currently operates directly on a standalone state
-directory. Stop gr8s before changing it and take a verified backup containing
-both the application data and cluster identity. There is not yet a leader-routed
-HA key-management workflow; do not run these commands independently against
-individual voters.
+`gr8s secrets-encrypt` operates directly on a standalone state directory. Stop gr8s
+before changing it and take a verified backup containing the application data, and
+cluster identity or a KMS recovery export. Give it the plugins its keys need with
+`--kms-plugin NAME=ENDPOINT`, and `--kms NAME` for `enable` or `prepare` to wrap the
+new key with one. Do not run these commands independently against individual HA
+voters; with a KMS, a key rotation follows the plugin online, from the leader.
 
 Enable encryption and rewrite existing Secrets in one operation:
 
@@ -85,7 +143,22 @@ sudo gr8s secrets-encrypt finalize  --state-directory /var/lib/gr8s/server
 Each command prints JSON containing the phase and non-secret key identifiers.
 `finalize` refuses to discard keys until re-encryption has completed. To return
 to plaintext storage, `disable` first rewrites Secrets and then removes the
-encryption configuration. External KMS providers are not implemented.
+encryption configuration.
+
+Move an existing cluster's Secrets to a KMS key the same way:
+
+```sh
+sudo systemctl stop gr8s-server.service
+K="--state-directory /var/lib/gr8s/server --kms-plugin gr8s=unix:///run/gr8s/kms.sock"
+sudo gr8s secrets-encrypt prepare $K --kms gr8s
+sudo gr8s secrets-encrypt promote $K
+sudo gr8s secrets-encrypt reencrypt $K
+sudo gr8s secrets-encrypt finalize $K
+sudo systemctl start gr8s-server.service
+```
+
+(`enable $K --kms gr8s` does it in one step for a cluster without encryption.) Then
+add `--kms-plugin gr8s=unix:///run/gr8s/kms.sock` to `serve`'s arguments.
 
 ## Runtime integration
 

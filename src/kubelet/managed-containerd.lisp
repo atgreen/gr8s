@@ -104,6 +104,9 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
   runtime-preparer
   bpf-mounter
   bpf-unmounter
+  ;; (manager) -> keeps containerd's state, with each container's environment, off
+  ;; the disk (podster-j9gd); injectable for testing.
+  state-mounter
   process
   ;; Supervision: a node agent restarts its runtime when it dies, as a real
   ;; node's service manager would (podster-uqb.138).
@@ -221,6 +224,7 @@ spamming the log on every poll.")
           (runtime-preparer #'call-with-runtime-assets)
           (bpf-mounter #'mount-managed-bpffs)
           (bpf-unmounter #'unmount-managed-bpffs)
+          (state-mounter #'mount-managed-containerd-state)
           (platform (containerd-platform-for-machine (machine-type)))
           (snapshotter "overlayfs")
           metadata-no-sync
@@ -271,6 +275,7 @@ spamming the log on every poll.")
      :runtime-preparer runtime-preparer
      :bpf-mounter bpf-mounter
      :bpf-unmounter bpf-unmounter
+     :state-mounter state-mounter
      :stopper stopper
      :exit-describer exit-describer
      :restart-initial-delay restart-initial-delay
@@ -357,6 +362,63 @@ spamming the log on every poll.")
       (error "could not mount the gr8s BPF filesystem at ~A: ~A"
              target (sb-int:strerror (sb-alien:get-errno))))
     target))
+
+(defun managed-containerd-shims-alive-p (socket &key (proc #P"/proc/"))
+  "True when a containerd shim of the containerd at SOCKET is running: its containers'
+state is in use."
+  (let ((needle (namestring socket)))
+    (some (lambda (directory)
+            (let ((line (ignore-errors
+                         (with-open-file (stream (merge-pathnames "cmdline" directory)
+                                                 :element-type '(unsigned-byte 8))
+                           (let ((octets (make-array 8192 :element-type '(unsigned-byte 8))))
+                             (map 'string #'code-char
+                                  (substitute 32 0 (subseq octets 0 (read-sequence octets stream)))))))))
+              (and line (search "containerd-shim" line) (search needle line))))
+          (uiop:subdirectories proc))))
+
+(defun mounts-under-p (directory &key (mount-info (uiop:read-file-string #P"/proc/thread-self/mountinfo")))
+  "True when anything is mounted at or below DIRECTORY."
+  (let ((prefix (string-right-trim "/" (namestring directory))))
+    ;; Under it, not beside it: containerd/runtime/bin is no mount under containerd/run.
+    (some (lambda (line)
+            (let ((point (nth 4 (uiop:split-string line :separator " "))))
+              (and point (or (string= point prefix)
+                             (eql 0 (search (concatenate 'string prefix "/") point))))))
+          (uiop:split-string mount-info :separator '(#\Newline)))))
+
+(defun mount-managed-containerd-state
+    (manager &key (euid (sb-posix:geteuid)) (mounted-p #'filesystem-mounted-at-p)
+                  (mounter #'%linux-mount) (shims-alive-p #'managed-containerd-shims-alive-p)
+                  (mounts-under-p #'mounts-under-p))
+  "Keep MANAGER's containerd state on a tmpfs, as stock containerd keeps it under /run
+(podster-j9gd): it holds each container's OCI spec, and so its environment, Secret
+values given as env vars among them, which on disk would outlive the Pod. A tmpfs
+already there is kept, across agent restarts, for the shims that outlive containerd.
+State on disk that a running shim uses is left there, and said so, until the node's
+Pods are gone or it restarts; dead state, as after a reboot, is removed first. Returns
+:tmpfs, or :disk with why."
+  (let ((directory (uiop:ensure-directory-pathname (managed-containerd-directory manager "containerd/run/")))
+        (socket (managed-containerd-socket-path manager)))
+    (ensure-directories-exist directory)
+    (flet ((disk (why)
+             (format *error-output* "gr8s: containerd's state stays on disk at ~A, ~A; Secret values given to containers as env vars are on disk with it~%"
+                     (namestring directory) why)
+             (values :disk why)))
+      (cond ((/= euid 0) (values :disk "not root"))
+            ((funcall mounted-p directory "tmpfs") :tmpfs)
+            ((funcall shims-alive-p socket)
+             (disk "while running containers use it (it moves to memory when the node restarts or its Pods are gone)"))
+            ((funcall mounts-under-p directory) (disk "as something is still mounted under it"))
+            (t
+             ;; Nothing alive uses what is here: a previous boot's state.
+             (dolist (entry (append (uiop:subdirectories directory) (uiop:directory-files directory)))
+               (if (uiop:directory-pathname-p entry)
+                   (uiop:delete-directory-tree entry :validate t :if-does-not-exist :ignore)
+                   (ignore-errors (delete-file entry))))
+             (if (zerop (funcall mounter "gr8s-containerd-state" (namestring directory) "tmpfs" #x6 "mode=0711"))
+                 :tmpfs
+                 (disk (format nil "as a tmpfs couldn't be mounted there: ~A" (sb-int:strerror (sb-alien:get-errno))))))))))
 
 (defun unmount-managed-bpffs (directory &key (unmounter #'%linux-umount))
   "Unmount the bpffs at DIRECTORY and return its namestring, unless it still
@@ -792,6 +854,8 @@ reconnects to them when it starts again."
   ;; A SIGKILL prevents the previous agent's unwind cleanup. Reclaim only the
   ;; exact process identity it recorded before replacing its configuration.
   (reclaim-stale-managed-containerd manager)
+  (when (managed-containerd-state-mounter manager)
+    (funcall (managed-containerd-state-mounter manager) manager))
   (write-managed-containerd-config manager)
   (setf (managed-containerd-process manager)
         (funcall (managed-containerd-launcher manager)

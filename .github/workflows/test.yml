@@ -121,6 +121,8 @@ jobs:
           cp build/release/gr8s-linux-amd64 build/release/gr8s-linux-arm64
           printf '#!/bin/sh\necho gr8\n' > build/release/gr8-linux-amd64
           cp build/release/gr8-linux-amd64 build/release/gr8-linux-arm64
+          printf '#!/bin/sh\necho gr8s-kms\n' > build/release/gr8s-kms-linux-amd64
+          cp build/release/gr8s-kms-linux-amd64 build/release/gr8s-kms-linux-arm64
           PKG_OUTPUT_DIRECTORY=build/packages releng/build-packages.sh
           for package in gr8s-0.0.0+gr8s.0-1.x86_64.rpm \
                          gr8s-0.0.0+gr8s.0-1.aarch64.rpm \

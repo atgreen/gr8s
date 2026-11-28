@@ -675,3 +675,49 @@
       (if saved
           (sb-posix:setenv "OTEL_EXPORTER_OTLP_ENDPOINT" saved 1)
           (sb-posix:unsetenv "OTEL_EXPORTER_OTLP_ENDPOINT")))))
+
+(test containerds-state-goes-to-memory-unless-running-containers-use-it-on-disk
+  ;; podster-j9gd: the state holds each container's OCI spec, env vars and the Secret
+  ;; values among them, so it belongs on a tmpfs, as stock containerd keeps it in /run.
+  (let* ((root (merge-pathnames (format nil "gr8s-state-test-~36R/" (random (expt 36 8)))
+                               (uiop:temporary-directory)))
+         (manager (gr8s.kubelet::make-managed-containerd
+                   :state-directory (namestring root) :executable "/opt/gr8s/bin/containerd"
+                   :oci-runtime "/opt/gr8s/bin/runc" :cni-bin-directory "/opt/gr8s/bin/cni/"
+                   :platform "linux/amd64"))
+         (state (gr8s.kubelet::managed-containerd-directory manager "containerd/run/"))
+         (mounted '()))
+    (unwind-protect
+         (flet ((place (&rest arguments)
+                  (apply #'gr8s.kubelet::mount-managed-containerd-state manager :euid 0
+                         :mounter (lambda (source target type flags data)
+                                    (declare (ignore source flags))
+                                    (push (list target type data) mounted) 0)
+                         arguments)))
+           ;; A previous boot's state: removed, then a tmpfs in its place.
+           (let ((stale (merge-pathnames "io.containerd.runtime.v2.task/k8s.io/old/config.json" state)))
+             (ensure-directories-exist stale)
+             (with-open-file (out stale :direction :output) (write-string "{\"env\":[\"TOKEN=secret\"]}" out))
+             (is (eq :tmpfs (place :mounted-p (constantly nil) :shims-alive-p (constantly nil)
+                                   :mounts-under-p (constantly nil))))
+             (is (null (probe-file stale)))
+             (is (equal (list (namestring state) "tmpfs" "mode=0711") (first mounted))))
+           ;; Already a tmpfs, as after an agent restart: kept, nothing removed or mounted.
+           (setf mounted '())
+           (is (eq :tmpfs (place :mounted-p (constantly t))))
+           (is (null mounted))
+           ;; Running containers use what is on disk: it stays until they're gone.
+           (is (eq :disk (place :mounted-p (constantly nil) :shims-alive-p (constantly t))))
+           (is (eq :disk (place :mounted-p (constantly nil) :shims-alive-p (constantly nil)
+                                :mounts-under-p (constantly t))))
+           (is (null mounted))
+           ;; Not root, as in tests and rootless runs: left as it is.
+           (is (eq :disk (gr8s.kubelet::mount-managed-containerd-state manager :euid 1000))))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(test a-mount-beside-containerds-state-isnt-one-under-it
+  (let ((mounts (format nil "1 2 0:1 / /var/lib/gr8s/agent/containerd/runtime/bin rw - tmpfs gr8s-runtime rw~%")))
+    (is-false (gr8s.kubelet::mounts-under-p #p"/var/lib/gr8s/agent/containerd/run/" :mount-info mounts))
+    (is-true (gr8s.kubelet::mounts-under-p
+              #p"/var/lib/gr8s/agent/containerd/run/"
+              :mount-info (format nil "1 2 0:1 / /var/lib/gr8s/agent/containerd/run/netns/cni-1 rw - nsfs nsfs rw~%")))))

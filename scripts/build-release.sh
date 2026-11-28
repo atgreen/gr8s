@@ -61,3 +61,6 @@ ocicl create-sbom spdx "$output/gr8s-linux-$architecture-lisp-sbom.spdx.json"
 make gr8
 cp -f build/gr8 "$output/gr8-linux-$architecture"
 (cd "$output" && sha256sum "gr8-linux-$architecture" > "gr8-linux-$architecture.sha256")
+# gr8s-kms, the bundled KMS v2 plugin (podster-af7o), ships beside them too.
+cp -f build/gr8s-kms "$output/gr8s-kms-linux-$architecture"
+(cd "$output" && sha256sum "gr8s-kms-linux-$architecture" > "gr8s-kms-linux-$architecture.sha256")

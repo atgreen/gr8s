@@ -28,6 +28,12 @@ contents:
     dst: /usr/bin/gr8
     file_info:
       mode: 0755
+  - src: build/package-stage/gr8s-kms
+    dst: /usr/bin/gr8s-kms
+    file_info:
+      mode: 0755
+  - src: releng/gr8s-kms.service
+    dst: /usr/lib/systemd/system/gr8s-kms.service
   - src: gr8s-killall.sh
     dst: /usr/bin/gr8s-killall.sh
     file_info:
