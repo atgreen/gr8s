@@ -50,7 +50,8 @@ mkdir -p "$output_directory" "$stage_directory"
 for architecture in amd64 arm64; do
   source_binary=$binary_directory/gr8s-linux-$architecture
   gr8_binary=$binary_directory/gr8-linux-$architecture
-  for binary in "$source_binary" "$gr8_binary"; do
+  kms_binary=$binary_directory/gr8s-kms-linux-$architecture
+  for binary in "$source_binary" "$gr8_binary" "$kms_binary"; do
     if [ ! -f "$binary" ]; then
       echo "build-packages: missing release binary: $binary" >&2
       exit 2
@@ -58,6 +59,7 @@ for architecture in amd64 arm64; do
   done
   cp -f "$source_binary" "$stage_directory/gr8s"
   cp -f "$gr8_binary" "$stage_directory/gr8"
+  cp -f "$kms_binary" "$stage_directory/gr8s-kms"
   export PKG_ARCH=$architecture
   export PKG_VERSION="$kubernetes_version+$gr8s_suffix"
   export PKG_RELEASE="${PKG_REVISION:-1}"

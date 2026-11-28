@@ -98,6 +98,7 @@ jobs:
           path: |
             build/release/gr8s-linux-*
             build/release/gr8-linux-*
+            build/release/gr8s-kms-linux-*
             build/release/gr8s-*-linux-*.tar.gz
           if-no-files-found: error
           compression-level: 0
@@ -186,7 +187,8 @@ jobs:
           cp -f LICENSE NOTICE release/
           cd release
           sha256sum -c gr8s-linux-amd64.sha256 gr8s-linux-arm64.sha256 \
-            gr8-linux-amd64.sha256 gr8-linux-arm64.sha256
+            gr8-linux-amd64.sha256 gr8-linux-arm64.sha256 \
+            gr8s-kms-linux-amd64.sha256 gr8s-kms-linux-arm64.sha256
           sha256sum -- * > ../SHA256SUMS
           mv -f ../SHA256SUMS .
 

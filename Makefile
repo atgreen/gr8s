@@ -216,6 +216,7 @@ dashboard-assets-compress:
 .PHONY: gr8 test-gr8
 gr8:
 	cd gr8 && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../build/gr8 ./cmd/gr8
+	cd gr8 && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../build/gr8s-kms ./cmd/gr8s-kms
 
 test-gr8:
 	cd gr8 && go vet ./... && go test ./...

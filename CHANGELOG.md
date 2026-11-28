@@ -9,6 +9,10 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Security
 
+- Containerd's state directory, which holds each container's OCI spec and so any
+  Secret given as an env var, is now a tmpfs (podster-j9gd), as stock containerd's
+  `/run/containerd` is, rather than on the node's disk. A node upgraded with Pods
+  running moves it when they're gone or it restarts, and logs that until then.
 - gr8 users on one machine are kept apart (podster-tcr8). A Pod in a namespace gr8
   --setup made must run as its owner's UID and groups, may not escalate privilege,
   drops all capabilities, and uses no host namespaces, host ports or other sysctls;
@@ -127,6 +131,20 @@ the Kubernetes API version with a gr8s release suffix (see
   cluster's Pod range and overlapping nothing else the node routes.
 
 ### Added
+
+- Secrets can be encrypted at rest with a KMS v2 plugin (podster-qyp9), the upstream
+  `k8s.io/kms` protocol: `serve --kms-plugin NAME=ENDPOINT`, `secrets-encrypt enable
+  or prepare --kms NAME`. The store keeps only data keys the plugin wrapped; a
+  `kms-providers` health check reports the plugin; a rotated KMS key is followed
+  online by a fresh data key. Any KMS v2 plugin works, Vault or OpenBao Transit and
+  cloud KMSes among them, and HA members reach the same KMS rather than share a key.
+- `gr8s-kms`, a bundled KMS v2 plugin, and `gr8s-kms.service` (podster-af7o). Its keys
+  are sealed with systemd-creds, to the TPM when there is one; `rotate`,
+  `export-recovery` and `import-recovery` (a passphrase-sealed copy for when the
+  machine is gone) manage them.
+- New standalone clusters from the packages encrypt their Secrets with `gr8s-kms`
+  from their first one (podster-wsmz): `server.env` now passes `--kms-plugin` and
+  `--encrypt-secrets-with`. Existing and HA clusters are left as they are.
 
 - gr8 asks, at the terminal, when a sandbox reaches a host its policy refuses: allow
   it once, always, or no (podster-3zu0). The node answers the name with an address that

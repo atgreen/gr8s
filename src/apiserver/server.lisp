@@ -212,10 +212,14 @@ arbitrarily old, and it cannot tell (podster-gxi)."
   "Checks /healthz and /livez report.")
 
 (defun health-endpoint-checks (endpoint)
-  "Return the checks ENDPOINT (healthz, livez or readyz) reports, in order."
-  (if (equal endpoint "readyz")
-      (append (subseq +health-common-checks+ 0 3) '("informer-sync") (subseq +health-common-checks+ 3))
-      +health-common-checks+))
+  "Return the checks ENDPOINT (healthz, livez or readyz) reports, in order; kms-providers
+too when the server has KMS v2 plugins, as upstream reports it (podster-qyp9)."
+  (let ((checks (if (equal endpoint "readyz")
+                    (append (subseq +health-common-checks+ 0 3) '("informer-sync") (subseq +health-common-checks+ 3))
+                    +health-common-checks+)))
+    (if (gr8s.resources::kms-providers-health)
+        (append checks '("kms-providers"))
+        checks)))
 
 (defun health-response (path &optional store follows-a-leader-fn)
   "Answer a health PATH such as /readyz or /livez/etcd, or return NIL for any other path."
@@ -245,6 +249,20 @@ arbitrarily old, and it cannot tell (podster-gxi)."
                    (format out (if (equal name "etcd") "[-]etcd failed: reason withheld~%" "[+]~A ok~%") name))
                  (format out "readyz check failed~%"))
                (format nil "[-]etcd failed: this member has lost the Raft leader~%")))
+          ;; A KMS plugin that isn't well fails the check, and with it the endpoint:
+          ;; Secrets can't be read or written without it.
+          ((and (member check '(nil "" "kms-providers") :test #'equal)
+                (not (member "kms-providers" (loop for (name . value) in (hunchentoot:get-parameters*)
+                                                   when (equal name "exclude") collect value)
+                             :test #'equal))
+                (not (nth-value 1 (gr8s.resources::kms-providers-health))))
+           (setf (hunchentoot:return-code*) 500)
+           (if (or check (hunchentoot:get-parameter "verbose"))
+               (with-output-to-string (out)
+                 (dolist (name checks)
+                   (format out (if (equal name "kms-providers") "[-]kms-providers failed: reason withheld~%" "[+]~A ok~%") name))
+                 (format out "~A check failed~%" endpoint))
+               (format nil "[-]kms-providers failed: reason withheld~%~A check failed~%" endpoint)))
           ((and check (plusp (length check)))
            (if (member check checks :test #'equal)
                "ok"

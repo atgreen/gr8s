@@ -1,0 +1,28 @@
+[Unit]
+Description=gr8s KMS v2 plugin: the key that protects gr8s Secrets at rest
+Documentation=https://github.com/atgreen/gr8s/blob/main/docs/configmap-secret-api.md
+# Its keyring is sealed with systemd-creds, to the TPM when there is one.
+After=tpm2.target
+Wants=tpm2.target
+Before=gr8s-server.service
+
+[Service]
+# The host key systemd-creds seals with (beside the TPM) is made once, outside the
+# sandbox below.
+ExecStartPre=+/usr/bin/systemd-creds setup
+ExecStart=/usr/bin/gr8s-kms serve --socket /run/gr8s/kms.sock --keyring /var/lib/gr8s/kms/keyring.cred
+Restart=always
+RestartSec=2s
+# What it wraps protects every Secret: nothing else may run as it, see it, or write
+# anywhere but its keyring.
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/gr8s/kms /run/gr8s
+StateDirectory=gr8s/kms
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

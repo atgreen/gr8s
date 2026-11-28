@@ -1,7 +1,7 @@
 [Unit]
 Description=gr8s Kubernetes server
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target gr8s-kms.service
+After=network-online.target gr8s-kms.service
 # A deterministic startup failure lands in `systemctl --failed` instead of
 # restarting forever.
 StartLimitIntervalSec=300

@@ -11,7 +11,7 @@ fi
 
 [ -d /run/systemd/system ] || exit 0
 systemctl daemon-reload || true
-for service in gr8s-server.service gr8s-agent.service; do
+for service in gr8s-server.service gr8s-agent.service gr8s-kms.service; do
   if systemctl is-active --quiet "$service"; then
     systemctl restart "$service" || true
   fi

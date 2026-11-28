@@ -286,6 +286,8 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                        :dns-serve-zones nil
                        :kubeconfig nil
                        :gr8-socket +gr8-user-socket-default+
+                       :kms-plugins '()
+                       :encrypt-secrets-with nil
                        :gr8-users nil
                        :kubelet-port +kubelet-default-port+
                        :local-storage-path +default-local-storage-path+)))
@@ -485,6 +487,11 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                       (setf (getf options :gr8-socket) (if (equal value "") nil value)))
                      ((string= option "--gr8-users")
                       (setf (getf options :gr8-users) value))
+                     ;; podster-qyp9: a KMS v2 plugin the Secret keys use; repeatable.
+                     ((string= option "--kms-plugin")
+                      (push (parse-kms-plugin-option value) (getf options :kms-plugins)))
+                     ((string= option "--encrypt-secrets-with")
+                      (setf (getf options :encrypt-secrets-with) value))
                      ((string= option "--kubelet-port")
                       (setf (getf options :kubelet-port) (if (equal value "0") 0 (parse-port value))))
                      ;; podster-cm3: the Pod interface MTU handed to every node.
@@ -3266,6 +3273,8 @@ between later ones. An ordinary restart recovers within the first.")
 
 (defun run-serve-command (options)
   "Own state before any application/PKI initialization, through final teardown."
+  ;; Before the store opens: reading its Secrets may take a KMS plugin's key.
+  (mapc #'gr8s.resources::register-kms-plugin (getf options :kms-plugins))
   (call-with-serve-state-ownership
    options
    (lambda ()
@@ -3308,9 +3317,13 @@ between later ones. An ordinary restart recovers within the first.")
                   (when (or (getf options :raft-init) (getf options :raft-join))
                     (gr8s.raft.transport::raft-reap-snapshot-directory
                      (merge-pathnames "raft/transfers/" state-directory)))
-                  (open-store state-directory
-                              :defer-restore-completion
-                              (and (or (getf options :raft-init) (getf options :raft-join)) t))))
+                  (let ((store (open-store state-directory
+                                           :defer-restore-completion
+                                           (and (or (getf options :raft-init) (getf options :raft-join)) t))))
+                    ;; Before anything is written, so a new cluster's Secrets are never
+                    ;; plaintext on disk (podster-wsmz).
+                    (encrypt-new-cluster-secrets store options)
+                    store)))
          (pool (ensure-controller-node-pool store state-directory options))
          (pki (ensure-control-plane-pki state-directory options))
          (server nil)
@@ -3695,13 +3708,15 @@ between later ones. An ordinary restart recovers within the first.")
                                   (format *error-output* "gr8s: no gr8 user socket at ~A: ~A~%"
                                           (getf options :gr8-socket) condition)
                                   nil)))))
-                      (unwind-protect
-                           (progn
-                             (format t "gr8s listening on https://~A:~D~%" address port)
-                             (finish-output)
-                             (notify-service-manager-ready)
-                             (loop until *shutdown-requested* do (sleep 0.1)))
-                        (when gr8-socket (stop-gr8-user-socket gr8-socket)))))
+                      (let ((kms (start-kms-maintenance store ha)))
+                        (unwind-protect
+                             (progn
+                               (format t "gr8s listening on https://~A:~D~%" address port)
+                               (finish-output)
+                               (notify-service-manager-ready)
+                               (loop until *shutdown-requested* do (sleep 0.1)))
+                          (when gr8-socket (stop-gr8-user-socket gr8-socket))
+                          (when kms (bt:destroy-thread kms))))))
                (when debug-port (stop-debug-server debug-port))
                (when aggregator (stop-api-aggregator aggregator))
                (when worker (stop-reconciliation-worker worker))
@@ -4552,6 +4567,8 @@ No HA API may start from member-local certificate state before this converges."
                         ("--disable-agent" "Run only the control plane")
                         ("--gr8-socket PATH" "Where local users get gr8 without sudo (default /run/gr8s/gr8.sock; \"\" for nowhere)")
                         ("--gr8-users GROUP" "Give gr8 only to GROUP's members (default: every local user)")
+                        ("--kms-plugin NAME=ENDPOINT" "A KMS v2 plugin whose keys protect Secrets (repeatable)")
+                        ("--encrypt-secrets-with NAME" "On a new standalone cluster, encrypt Secrets from the start with that plugin")
                         ("--node-max-connections N" "Accept at most N node connections at once (default 512): one per node, and per browser node this server hosts")
                         ("--browser-listen HOST:PORT" "Serve the browser-node join page and sessions there (podster-57fv)")
                         ("--browser-distro FILE" "The root image (erofs) browser nodes boot Pods from")
@@ -4719,7 +4736,10 @@ No HA API may start from member-local certificate state before this converges."
                          ("promote" "Make the prepared key active for new writes")
                          ("reencrypt" "Rewrite all Secrets with the active key")
                          ("finalize" "Discard superseded encryption keys"))
-             :options '(("--help, -h" "show help"))))
+             :options '(("--state-directory DIR" "Folder holding cluster state")
+                        ("--kms-plugin NAME=ENDPOINT" "A KMS v2 plugin the keys use (repeatable)")
+                        ("--kms NAME" "For enable or prepare: wrap the new key with that plugin")
+                        ("--help, -h" "show help"))))
       ((equal path '("status"))
        (page "Show cluster health at a glance" "[OPTIONS]"
              :options '(("--kubeconfig PATH" "Cluster kubeconfig (default $KUBECONFIG or ~/.kube/config)")
