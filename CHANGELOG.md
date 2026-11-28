@@ -23,6 +23,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- A server hosts more than 31 browser nodes (podster-7op6). Each node's agent dials
+  the node listener from the server's own address, and the listener took at most
+  32 connections from one address and 128 in all, so tabs past 31 joined but never
+  went Ready. Loopback and the other control-plane members are now outside the
+  per-address cap, and the listener takes 512 connections (`--node-max-connections`).
 - A browser node whose tab closes is deleted at once, with its Pods, so their
   controllers start replacements elsewhere within seconds (podster-yucg). The Node
   used to stay until its lease lapsed and the Pod garbage collector caught up. A tab
