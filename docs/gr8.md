@@ -40,6 +40,45 @@ means "could not resolve host".
 The RPM and DEB packages install `/usr/bin/gr8` next to `gr8s`. From a source
 tree, `make gr8` builds `build/gr8`.
 
+## Setting up
+
+On a machine with the package installed and no cluster yet, run gr8 once:
+
+```console
+$ gr8 claude
+gr8: No cluster is set up for gr8. Make this machine a gr8s node? (uses sudo) [y/N] y
+gr8: setting up a gr8s node on this machine; sudo will ask for your password
+gr8: starting gr8s-server
+gr8: waiting for this machine's node to be Ready
+gr8: ready; your kubeconfig is /home/you/.config/gr8/kubeconfig
+```
+
+`gr8 --setup` does the same without asking, and then runs the command if you name
+one. gr8 asks only on a terminal, and only when it finds no kubeconfig at all
+(none named, no `$KUBECONFIG`, no `~/.kube/config`).
+
+Setup runs `sudo gr8 --internal setup` once. That:
+
+- enables and starts `gr8s-server`, unless it is already running;
+- waits for this machine's node to be Ready;
+- creates the `gr8` namespace and grants you, as the user `gr8:YOU`, what gr8
+  needs and no more: Pods, their exec, Secrets and SecurityProfiles in `gr8`;
+  reading Nodes and Namespaces; and the SandboxProfiles and ClusterNetworkPolicies
+  gr8 creates for a run;
+- writes your kubeconfig, with a client certificate for `gr8:YOU`, to
+  `~/.config/gr8/kubeconfig`.
+
+The credential is not the administrator's: it can't read other namespaces or
+change RBAC. ClusterNetworkPolicies are cluster-wide, so it can still widen the
+network reach of other Pods on the cluster, which matters on a shared cluster but
+not on your own desktop. gr8 reads `~/.config/gr8/kubeconfig` after `--kubeconfig`
+and `$KUBECONFIG` and before `~/.kube/config`, so an existing kubectl setup is left
+as it is. Running setup again renews the grant and the file.
+
+A machine that runs `gr8s-agent` is part of a cluster elsewhere; setup refuses
+there, and that cluster's administrator issues the kubeconfig
+(`gr8s kubeconfig --user NAME`, then the same grant).
+
 ## Running a command
 
 ```text
@@ -54,7 +93,8 @@ gr8 [flags] COMMAND [ARG...]
 | `--env NAME` | Pass environment variable NAME through. Repeatable. |
 | `--namespace NAME` | Namespace for the Pod (default `gr8`). |
 | `--node NAME` | Node to run on (default: the one with this host's address). |
-| `--kubeconfig FILE` | Kubeconfig (default: `$KUBECONFIG`, then `~/.kube/config`). |
+| `--kubeconfig FILE` | Kubeconfig (default: `$KUBECONFIG`, then `~/.config/gr8/kubeconfig`, then `~/.kube/config`). |
+| `--setup` | Make this machine a gr8s node for you (see Setting up), then run COMMAND if given. |
 | `--keep` | Keep the Pod, and any `--allow` policy, after the command exits. |
 | `--policy NAME\|FILE` | Use this policy instead of the command's own. |
 | `--login NAME` | Move a tool's login into the cluster (see Logins). |

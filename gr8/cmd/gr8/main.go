@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 
+	"golang.org/x/term"
+
 	"github.com/atgreen/gr8s/gr8/internal/client"
 	"github.com/atgreen/gr8s/gr8/internal/sandbox"
 )
@@ -33,6 +35,8 @@ func main() {
 			os.Exit(sandbox.Enter(client.HostRoot, os.Args[3:]))
 		case "confine":
 			os.Exit(sandbox.Confine(os.Args[3:]))
+		case "setup":
+			os.Exit(client.SetupAsRoot())
 		}
 		fmt.Fprintf(os.Stderr, "gr8: no internal mode %q\n", os.Args[2])
 		os.Exit(sandbox.ExitCannotRun)
@@ -44,7 +48,7 @@ func run() int {
 	var options client.Options
 	var readOnly, readWrite, env, allow stringList
 	var login, logout string
-	var logins bool
+	var logins, setup bool
 	flags := flag.NewFlagSet("gr8", flag.ExitOnError)
 	flags.Usage = func() {
 		fmt.Fprintf(flags.Output(), "usage: gr8 [flags] COMMAND [ARG...]\n\n"+
@@ -54,7 +58,8 @@ func run() int {
 			"and GPU.\n\n")
 		flags.PrintDefaults()
 	}
-	flags.StringVar(&options.Kubeconfig, "kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, then ~/.kube/config)")
+	flags.StringVar(&options.Kubeconfig, "kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, then ~/.config/gr8/kubeconfig, then ~/.kube/config)")
+	flags.BoolVar(&setup, "setup", false, "make this machine a gr8s node for you (uses sudo), then run COMMAND if given")
 	flags.StringVar(&options.Node, "node", "", "node to run on (default: the node with this host's address)")
 	flags.StringVar(&options.Namespace, "namespace", "gr8", "namespace for the Pod")
 	flags.StringVar(&options.Image, "image", "registry.k8s.io/pause:3.10", "container image (its files are not used)")
@@ -74,6 +79,21 @@ func run() int {
 	flags.Var(&allow, "allow", "also allow reaching `HOSTNAME` (repeatable; *.example.com for subdomains)")
 	flags.Var(&env, "env", "also pass environment variable `NAME` (repeatable)")
 	_ = flags.Parse(os.Args[1:])
+	// With no kubeconfig at all, offer to set this machine up rather than fail.
+	home, _ := os.UserHomeDir()
+	if !setup && client.NeedsSetup(options.Kubeconfig, os.Getenv, home) &&
+		term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd())) {
+		setup = client.TerminalAsk(os.Stdin, os.Stderr)("No cluster is set up for gr8. Make this machine a gr8s node? (uses sudo)")
+	}
+	if setup {
+		if err := client.Setup(home); err != nil {
+			fmt.Fprintf(os.Stderr, "gr8 --setup: %v\n", err)
+			return 1
+		}
+		if flags.NArg() == 0 && login == "" && logout == "" && !logins {
+			return 0
+		}
+	}
 	switch {
 	case login != "":
 		if err := client.StoreLogin(options.Kubeconfig, options.Namespace, login); err != nil {

@@ -780,9 +780,10 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
 
 (defun parse-kubeconfig-options (arguments)
   "Parse `gr8s kubeconfig' ARGUMENTS into an options plist (--output file,
-   --server URL). Signals on an unknown option."
+   --server URL, --user NAME). Signals on an unknown option."
   (let ((options (list :command :kubeconfig
                        :output nil
+                       :user nil
                        :server "https://127.0.0.1:6443"
                        :state-directory (namestring (default-state-directory)))))
     (loop while arguments
@@ -793,6 +794,10 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                 (setf (getf options :output) value))
                ((string= option "--server")
                 (setf (getf options :server) value))
+               ((string= option "--user")
+                (unless (gr8s.apiserver::kubeconfig-user-name-p value)
+                  (error "--user must be a plain name, not ~S" value))
+                (setf (getf options :user) value))
                ((string= option "--state-directory")
                 (setf (getf options :state-directory) value))
                (t (error "unknown kubeconfig option: ~A" option)))
@@ -2418,14 +2423,18 @@ needs no shell/coreutils/util-linux. Returns 0."
   (merge-pathnames "kubeconfig" (uiop:ensure-directory-pathname (getf options :state-directory))))
 
 (defun write-administrative-kubeconfig (options &optional stream)
-  "Write or print a kubeconfig for the existing cluster selected by OPTIONS."
+  "Write or print a kubeconfig for the existing cluster selected by OPTIONS: the
+administrator's, or with :user that user's, who may do only what RBAC grants it."
   (let* ((state (uiop:ensure-directory-pathname (getf options :state-directory)))
          (root (merge-pathnames "pki/" state)))
     (unless (and (probe-file (merge-pathnames "pki/cluster-ca.crt" root))
                  (probe-file (merge-pathnames "pki/cluster-ca.key" root)))
       (error "cluster PKI does not exist in the selected state directory"))
     (let ((pki (ensure-cluster-pki root)))
-      (multiple-value-bind (certificate key) (ensure-admin-client-credentials pki)
+      (multiple-value-bind (certificate key)
+          (if (getf options :user)
+              (gr8s.apiserver::ensure-user-client-credentials pki (getf options :user))
+              (ensure-admin-client-credentials pki))
         (if stream
                             (print-kubeconfig stream (getf options :server)
                               :ca-certificates (cluster-pki-trust-certificates pki)
@@ -4551,6 +4560,7 @@ No HA API may start from member-local certificate state before this converges."
              :options '(("--state-directory DIR" "Folder holding cluster state")
                         ("--server URL" "Kubernetes API URL")
                         ("--output FILE" "Write kubeconfig to a private file")
+                        ("--user NAME" "Issue it to user NAME, who may do only what RBAC grants it")
                         ("--help, -h" "show help"))))
       ((equal path '("agent"))
        (page "Run a node agent" "[OPTIONS]"

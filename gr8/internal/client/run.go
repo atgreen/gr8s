@@ -584,9 +584,12 @@ func (sizes *terminalSizes) stop() {
 	close(sizes.done)
 }
 
-// clients loads kubeconfig (or $KUBECONFIG, then ~/.kube/config) into a REST config and
-// clientset.
+// clients loads kubeconfig (or $KUBECONFIG, then the one gr8 setup wrote, then
+// ~/.kube/config) into a REST config and clientset.
 func clients(kubeconfig string) (*rest.Config, *kubernetes.Clientset, error) {
+	if home, err := os.UserHomeDir(); err == nil {
+		kubeconfig = DefaultKubeconfig(kubeconfig, os.Getenv, home)
+	}
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		&clientcmd.ClientConfigLoadingRules{
 			ExplicitPath: kubeconfig,

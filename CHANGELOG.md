@@ -120,6 +120,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- `gr8 --setup` makes a fresh machine a gr8s node for the desktop user, and gr8
+  offers it on a terminal when it finds no kubeconfig (podster-q35k). One sudo
+  starts `gr8s-server`, waits for the node, and grants the user only what gr8
+  needs; the user's kubeconfig, at `~/.config/gr8/kubeconfig`, carries a client
+  certificate of its own, never the administrator's. `gr8s kubeconfig --user
+  NAME` issues such a certificate.
 - StatefulSet `updateStrategy: Recreate`, for Kubernetes 1.38 (podster-i18c.5): every
   old-revision Pod is deleted, and no new-revision Pod is made until none is left, so
   the two never run at once; the `Progressing` condition reports `RecreateInProgress`
