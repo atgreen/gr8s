@@ -28,6 +28,10 @@ the Kubernetes API version with a gr8s release suffix (see
   32 connections from one address and 128 in all, so tabs past 31 joined but never
   went Ready. Loopback and the other control-plane members are now outside the
   per-address cap, and the listener takes 512 connections (`--node-max-connections`).
+- A browser node's agent no longer opens its hosting server's node ports, health
+  check ports and Gateway listeners (podster-mtqe). It runs in that server's process
+  and network, where the server's own agent already holds them, so each browser node
+  retried them, failing with EADDRINUSE about 1000 times a minute.
 - A browser node whose tab closes is deleted at once, with its Pods, so their
   controllers start replacements elsewhere within seconds (podster-yucg). The Node
   used to stay until its lease lapsed and the Pod garbage collector caught up. A tab

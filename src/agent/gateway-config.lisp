@@ -104,7 +104,8 @@ The caller holds the node apply lock; no durable resource index is modified."
            ;; Challenges change no listener, so a batch of only them skips convergence.
            (setf gr8s.controllers::*gateway-acme-challenges*
                  (gr8s.controllers::gateway-acme-challenge-table view))
-           (cond ((and changes (every (lambda (entry) (equal "challenges" (first (car entry)))) changes)))
+           (cond ((node-runtime-virtual-p node-runtime))
+                 ((and changes (every (lambda (entry) (equal "challenges" (first (car entry)))) changes)))
                  ((and changes (gr8s.controllers::gateway-controller-parent-listeners controller)
                        (every (lambda (entry) (equal "httproutes" (first (car entry)))) changes))
                   (gr8s.controllers::converge-gateway-http-route-changes controller old-store changes))
