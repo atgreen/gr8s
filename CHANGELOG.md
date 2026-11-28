@@ -23,6 +23,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- The lab scale run is measured again with podster-7op6 and podster-mtqe fixed
+  (podster-i7yl). A browser node costs its server about 0.007 of a core and 6 to
+  8 MiB, not the 2% of the machine the first run showed: that was the reconnect
+  loop past the per-address cap and the port binding loop. The scale harness now
+  measures the server idle first and in steady state, and skips a sample a
+  checkpoint turns away instead of stopping.
 - A server hosts more than 31 browser nodes (podster-7op6). Each node's agent dials
   the node listener from the server's own address, and the listener took at most
   32 connections from one address and 128 in all, so tabs past 31 joined but never

@@ -188,27 +188,37 @@ the ceiling, and `--browser-max-per-client`):
 2026-11-27, on the lab cluster: an HA pair of 4-CPU, 8 GB members. The join listener
 ran on the follower (gr8s2). One headless Chromium on another machine opened tabs on
 the join page in waves of 10 every 30 s, up to 60
-(`tests/browser-node/scale-run.py`). A second run opened 15 tabs, each running one
-busybox Pod from a DaemonSet.
+(`tests/browser-node/scale-run.py`). The harness measures the server for 30 s
+before the first tab, and again once the last wave has settled.
+
+The first run found two bugs, and its numbers were mostly their cost:
+
+- **A cap of 31 nodes (podster-7op6).** Each browser node's agent holds a node
+  session from the server's own address. The node listener took at most 32
+  connections from one address, so tabs past 31 joined but never went Ready, and
+  their agents reconnected in a loop. This applied to a single server too, whose
+  agents dial it on 127.0.0.1.
+- **Port binding loops (podster-mtqe).** Every browser node's agent tried to open
+  the host's node ports and Gateway listeners, which the server's own agent holds.
+  This failed about 1000 times a minute.
+
+Together, they made a node look like it cost 2% of the machine (12% busy idle,
+about 80% at 31 nodes). With both fixed:
 
 | | |
 |---|---|
-| server memory per browser node (RSS, and the drop in `MemAvailable`) | about 9 MiB |
-| server CPU per idle browser node | about 2% of the 4 CPUs |
-| server CPU, idle, then with 31 nodes | 12%, then about 80% |
-| a browser Pod, from creation to Ready, 13 Pods in waves of 5 | median 5 s, 95th percentile 20 s |
-| Nodes gone after 53 tabs closed at once | all, within about 40 s |
-| most browser nodes Ready at once | 31 |
+| browser nodes Ready, of 60 tabs | 60 |
+| server CPU, idle, then with 60 nodes | 32%, then 43% |
+| server CPU per idle browser node | about 0.007 of a core, 0.2% of the 4 CPUs |
+| server memory per browser node (RSS; drop in `MemAvailable`) | about 6 MiB; about 8 MiB |
+| Nodes gone after 60 tabs closed at once | all, within 25 s |
+| a browser Pod, from creation to Ready, 13 Pods in waves of 5 (first run) | median 5 s, 95th percentile 20 s |
 
-The breaking point was 31 nodes. Each browser node's agent holds a node session
-from the server's own address, and the node server took at most 32 connections
-from one address. Tabs past that joined and got a Node, but it never went Ready.
-The same cap applied to a single server, whose agents dial it on 127.0.0.1. Since
-podster-7op6, the cap leaves out loopback and the other control-plane members, and
-the node server takes 512 connections in all (`--node-max-connections`). Past that,
-CPU is the next limit: at about 2% per node, 4 CPUs pass
-the 90% busy limit near 37 nodes (podster-i7yl). Memory comes last: at 9 MiB per
-node, a 1 GiB reserve on this machine leaves room for about 300 more.
+The idle load was higher on the day of the second run (podster-480g). At these
+rates, this machine's CPUs would pass the 90% busy limit at about 300 browser
+nodes. A 1 GiB memory reserve would allow about 400. The node listener takes 512
+connections (`--node-max-connections`). Past a few hundred nodes, the limit is the
+server's CPU, which `--browser-busy-above` already guards.
 
 ## Milestones
 
