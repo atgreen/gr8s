@@ -80,6 +80,12 @@ cleanup() {
     fi
     echo "gr8s smoke diagnostics preserved at $work_directory" >&2
   else
+    # The agent leaves its bpffs mounted with the node's Service maps pinned, for
+    # the next agent to adopt; this run has none, so unmount what it left.
+    awk -v prefix="$work_directory/" 'index($2, prefix) == 1 { print $2 }' /proc/mounts |
+      sort -r | while read -r mount_point; do
+        umount "$mount_point" 2>/dev/null || umount -l "$mount_point" 2>/dev/null || true
+      done
     rm -rf -- "$work_directory"
   fi
   exit "$status"
@@ -264,13 +270,15 @@ until [ "$(kubectl --kubeconfig "$work_directory/kubeconfig" get pod gw-web \
   sleep 0.1
 done
 
-gw_server=$(kubectl --kubeconfig "$work_directory/kubeconfig" config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-gw_post() {
-  gw_code=$(curl -s -o "$work_directory/gw-create.out" -w '%{http_code}' \
-    -X POST -H 'Content-Type: application/json' --data @"$2" "$gw_server$1")
-  if [ "$gw_code" != "201" ] && [ "$gw_code" != "200" ]; then
-    echo "Gateway API create $1 failed: HTTP $gw_code" >&2; cat "$work_directory/gw-create.out" >&2; exit 1
+# The API is authenticated TLS, so objects go through kubectl, not a bare curl
+# (which failed the TLS handshake and, under set -e, ended the run silently).
+api_create() {
+  if ! kubectl --kubeconfig "$work_directory/kubeconfig" create -f "$1" >"$work_directory/api-create.out" 2>&1; then
+    echo "create $1 failed:" >&2; cat "$work_directory/api-create.out" >&2; exit 1
   fi
+}
+api_delete() {
+  kubectl --kubeconfig "$work_directory/kubeconfig" delete --raw "$1" >/dev/null 2>&1 || true
 }
 cat >"$work_directory/gatewayclass.json" <<'JSON'
 {"apiVersion":"gateway.networking.k8s.io/v1","kind":"GatewayClass","metadata":{"name":"gr8s"},"spec":{"controllerName":"gr8s.io/gateway-controller"}}
@@ -281,9 +289,9 @@ JSON
 cat >"$work_directory/httproute.json" <<'JSON'
 {"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"web-route","namespace":"default"},"spec":{"parentRefs":[{"name":"web-gw"}],"hostnames":["gw.example.com"],"rules":[{"backendRefs":[{"name":"gw-web","port":8080}]}]}}
 JSON
-gw_post "/apis/gateway.networking.k8s.io/v1/gatewayclasses" "$work_directory/gatewayclass.json"
-gw_post "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways" "$work_directory/gateway.json"
-gw_post "/apis/gateway.networking.k8s.io/v1/namespaces/default/httproutes" "$work_directory/httproute.json"
+api_create "$work_directory/gatewayclass.json"
+api_create "$work_directory/gateway.json"
+api_create "$work_directory/httproute.json"
 
 # The agent converges the Gateway into an L7 listener on 127.0.0.1:18088. Retry
 # until the route serves the backend body through the proxy.
@@ -317,8 +325,8 @@ JSON
 cat >"$work_directory/certificate.json" <<'JSON'
 {"apiVersion":"cert-manager.io/v1","kind":"Certificate","metadata":{"name":"web-cert","namespace":"default"},"spec":{"secretName":"web-tls","issuerRef":{"name":"selfsigned","kind":"ClusterIssuer"},"dnsNames":["gw.example.com"],"duration":"24h"}}
 JSON
-gw_post "/apis/cert-manager.io/v1/clusterissuers" "$work_directory/clusterissuer.json"
-gw_post "/apis/cert-manager.io/v1/namespaces/default/certificates" "$work_directory/certificate.json"
+api_create "$work_directory/clusterissuer.json"
+api_create "$work_directory/certificate.json"
 
 cm_crt=
 for attempt in $(seq 1 60); do
@@ -338,8 +346,8 @@ if ! printf '%s' "$cm_crt" | base64 -d 2>/dev/null | grep -q "BEGIN CERTIFICATE"
   echo "cert-manager tls.crt is not a PEM certificate" >&2; exit 1
 fi
 echo "cert-manager issued a kubernetes.io/tls Secret from a selfSigned Certificate"
-curl -s -o /dev/null -X DELETE "$gw_server/apis/cert-manager.io/v1/namespaces/default/certificates/web-cert" || true
-curl -s -o /dev/null -X DELETE "$gw_server/apis/cert-manager.io/v1/clusterissuers/selfsigned" || true
+api_delete /apis/cert-manager.io/v1/namespaces/default/certificates/web-cert
+api_delete /apis/cert-manager.io/v1/clusterissuers/selfsigned
 kubectl --kubeconfig "$work_directory/kubeconfig" -n default delete secret web-tls --ignore-not-found >/dev/null
 
 # Tear the gateway scenario down and wait for the backend Pod's network state to
@@ -350,7 +358,7 @@ for gw_url in \
   "/apis/gateway.networking.k8s.io/v1/namespaces/default/httproutes/web-route" \
   "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/web-gw" \
   "/apis/gateway.networking.k8s.io/v1/gatewayclasses/gr8s"; do
-  curl -s -o /dev/null -X DELETE "$gw_server$gw_url" || true
+  api_delete "$gw_url"
 done
 attempt=0
 until [ "$(ls -1 "$work_directory/state/agent/containerd/run/io.containerd.grpc.v1.cri/netns/" 2>/dev/null | wc -l)" -le 1 ]; do
@@ -371,19 +379,7 @@ cat >"$work_directory/netpol.json" <<'JSON'
  "spec":{"podSelector":{},"policyTypes":["Egress"],
          "egress":[{"to":[{"ipBlock":{"cidr":"10.123.0.0/16"}}]}]}}
 JSON
-np_path=/apis/networking.k8s.io/v1/namespaces/default/networkpolicies
-# POST directly with an explicit JSON content-type: the resource is served by the
-# generic router (not yet advertised in discovery, and kubectl --raw does not set
-# a content-type the server accepts). The API is plain HTTP on localhost.
-np_server=$(kubectl --kubeconfig "$work_directory/kubeconfig" config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-np_code=$(curl -s -o "$work_directory/netpol-create.out" -w '%{http_code}' \
-  -X POST -H 'Content-Type: application/json' \
-  --data @"$work_directory/netpol.json" "$np_server$np_path")
-if [ "$np_code" != "201" ] && [ "$np_code" != "200" ]; then
-  echo "NetworkPolicy create failed: HTTP $np_code" >&2
-  cat "$work_directory/netpol-create.out" >&2
-  exit 1
-fi
+api_create "$work_directory/netpol.json"
 enforced=0
 for attempt in $(seq 1 25); do
   if ! kubectl --kubeconfig "$work_directory/kubeconfig" \
