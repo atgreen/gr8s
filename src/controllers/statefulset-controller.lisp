@@ -285,6 +285,27 @@ while a parallel one first replaces old Pods that are already unavailable."
                          (statefulset-delete-pod reconciler member set)
                          (decf budget))))))))))))
 
+(defun statefulset-recreate (reconciler set update members)
+  "For a Recreate update, delete every member not at UPDATE's revision, all at once, and return
+true while any of them remains, terminating ones included: as upstream does, no new-revision Pod
+is made while an old one exists, so the two never run together."
+  (let ((name (gethash "name" (workload-metadata update))) (pending nil))
+    (dolist (member members pending)
+      (unless (equal name (statefulset-member-revision member))
+        (setf pending t)
+        (unless (deletion-requested-p (statefulset-member-pod member))
+          (statefulset-delete-pod reconciler member set))))))
+
+(defun statefulset-recreate-condition (prior status reason message)
+  "SET's Progressing condition for a Recreate update, keeping its transition time while its
+STATUS holds, from PRIOR, the conditions it had."
+  (let* ((old (find "Progressing" prior :test #'equal :key (lambda (condition) (gethash "type" condition))))
+         (now (current-timestamp (funcall *workload-clock*))))
+    (core-object "type" "Progressing" "status" status "reason" reason "message" message
+                 "lastTransitionTime" (if (and old (equal status (gethash "status" old)))
+                                          (gethash "lastTransitionTime" old now)
+                                          now))))
+
 (defun statefulset-delete-scaled-claims (store set members)
   "Delete the claims of ordinals scaled away once their Pods are gone, when retention asks for it."
   (let* ((spec (gethash "spec" set)) (start (statefulset-start-ordinal spec)) (end (+ start (gethash "replicas" spec))))
@@ -321,8 +342,9 @@ while a parallel one first replaces old Pods that are already unavailable."
                                   (gethash "name" metadata) :uid (gethash "uid" metadata))))
         (decf excess)))))
 
-(defun publish-statefulset-status (reconciler set current update)
-  "Report what SET's Pods actually show, and finish a rollout that has reached every replica."
+(defun publish-statefulset-status (reconciler set current update &key recreating)
+  "Report what SET's Pods actually show, and finish a rollout that has reached every replica.
+RECREATING is true while a Recreate update still has old-revision Pods."
   (let* ((members (statefulset-member-pods reconciler set)) (spec (gethash "spec" set))
          (minimum (gethash "minReadySeconds" spec)) (prior (gethash "status" set (core-object)))
          (current-name (gethash "name" (workload-metadata current)))
@@ -336,7 +358,7 @@ while a parallel one first replaces old Pods that are already unavailable."
         (let ((revision (statefulset-member-revision member)))
           (when (equal revision current-name) (incf on-current))
           (when (equal revision update-name) (incf on-update)))))
-    (when (and (equal "RollingUpdate" (gethash "type" (gethash "updateStrategy" spec)))
+    (when (and (member (gethash "type" (gethash "updateStrategy" spec)) '("RollingUpdate" "Recreate") :test #'equal)
                (= on-update replicas (gethash "replicas" spec)) (= ready replicas))
       (setf current-name update-name on-current on-update))
     (let ((status (core-object "observedGeneration" (gethash "generation" (workload-metadata set))
@@ -345,6 +367,22 @@ while a parallel one first replaces old Pods that are already unavailable."
                                "currentRevision" current-name "updateRevision" update-name)))
       (dolist (field '("collisionCount" "conditions"))
         (when (nth-value 1 (gethash field prior)) (setf (gethash field status) (gethash field prior))))
+      ;; As upstream reports a Recreate update: in progress until every replica is at the
+      ;; update revision and ready, then completed.
+      (when (equal "Recreate" (gethash "type" (gethash "updateStrategy" spec)))
+        (let* ((conditions (coerce (gethash "conditions" status #()) 'list))
+               (others (remove "Progressing" conditions :test #'equal :key (lambda (condition) (gethash "type" condition))))
+               (progressing
+                 (cond (recreating
+                        (statefulset-recreate-condition conditions "True" "RecreateInProgress" "Deleting old revision pods"))
+                       ((not (equal current-name update-name))
+                        (statefulset-recreate-condition conditions "True" "RecreateInProgress"
+                                                        "Waiting for new-revision pods to be created"))
+                       ((find "Progressing" conditions :test #'equal :key (lambda (condition) (gethash "type" condition)))
+                        (statefulset-recreate-condition conditions "False" "RecreateCompleted"
+                                                        "All pods recreated successfully")))))
+          (when progressing
+            (setf (gethash "conditions" status) (coerce (append others (list progressing)) 'vector)))))
       (update-workload-controller-status (reconciler-store reconciler) "statefulsets" set status))))
 
 (defun reconcile-statefulset (reconciler set)
@@ -356,9 +394,12 @@ while a parallel one first replaces old Pods that are already unavailable."
                                 :key (lambda (revision) (gethash "name" (workload-metadata revision))))
                           update))
              (members (statefulset-member-pods reconciler set)))
-        (unless (or (statefulset-scale-up reconciler set current update members)
-                    (statefulset-scale-down reconciler set members))
-          (statefulset-roll reconciler set update members))
-        (statefulset-delete-scaled-claims store set members)
-        (publish-statefulset-status reconciler set current update)
+        (let ((recreating (and (equal "Recreate" (gethash "type" (gethash "updateStrategy" (gethash "spec" set))))
+                               (statefulset-recreate reconciler set update members))))
+          (unless (or recreating
+                      (statefulset-scale-up reconciler set current update members)
+                      (statefulset-scale-down reconciler set members))
+            (statefulset-roll reconciler set update members))
+          (statefulset-delete-scaled-claims store set members)
+          (publish-statefulset-status reconciler set current update :recreating recreating))
         (statefulset-truncate-history store set revisions current update (statefulset-member-pods reconciler set))))))

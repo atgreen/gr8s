@@ -26,10 +26,13 @@
   "Default and validate updateStrategy, including a rolling update's maxUnavailable."
   (let* ((strategy (statefulset-object-field spec "updateStrategy"))
          (type (let ((value (gethash "type" strategy))) (if (member value '(nil null "") :test #'equal) "RollingUpdate" value))))
-    (unless (member type '("RollingUpdate" "OnDelete") :test #'equal)
-      (core-resource-error 422 "Invalid" "spec.updateStrategy.type must be RollingUpdate or OnDelete"))
+    ;; Recreate comes with StatefulSetRecreateStrategy, beta and on by default from v1.38.
+    (unless (or (member type '("RollingUpdate" "OnDelete") :test #'equal)
+                (and (equal type "Recreate") (gr8s.foundation::kubernetes-minor-at-least-p 38)))
+      (core-resource-error 422 "Invalid" "spec.updateStrategy.type must be ~:[RollingUpdate or OnDelete~;RollingUpdate, OnDelete or Recreate~]"
+                           (gr8s.foundation::kubernetes-minor-at-least-p 38)))
     (setf (gethash "type" strategy) type (gethash "updateStrategy" spec) strategy)
-    (if (equal type "OnDelete")
+    (if (member type '("OnDelete" "Recreate") :test #'equal)
         (if (member (gethash "rollingUpdate" strategy) '(nil null))
             (remhash "rollingUpdate" strategy)
             (core-resource-error 422 "Invalid" "spec.updateStrategy.rollingUpdate is only allowed with type RollingUpdate"))

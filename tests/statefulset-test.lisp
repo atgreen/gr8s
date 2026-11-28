@@ -286,6 +286,58 @@
     (stateful-settle reconciler)
     (is (equal "busybox:2" (stateful-pod-image store "web-0")))))
 
+(test statefulset-recreate-replaces-every-pod-before-making-new-ones
+  ;; podster-i18c.5: StatefulSetRecreateStrategy, beta and on from v1.38. Every old-revision
+  ;; Pod goes, and no new-revision Pod is made until none is left, so the two never run at
+  ;; once; the Progressing condition tells it, as upstream's does.
+  (with-replaced-functions ((gr8s.foundation::kubernetes-minor-at-least-p (lambda (minor) (<= minor 38))))
+    (with-budget-cluster (store runtime reconciler)
+      (gr8s.resources::create-core-resource store "statefulsets" (stateful-fixture "web" :update-type "Recreate") "alpha")
+      (stateful-settle reconciler)
+      (dolist (name '("web-0" "web-1" "web-2")) (is (equal "busybox:1.36.1" (stateful-pod-image store name))))
+      (stateful-set-image store "web" "busybox:2")
+      (gr8s.controllers::reconcile-workloads reconciler)
+      ;; One pass: every old Pod is gone or going, and none of the new revision exists yet.
+      (let ((pods (list-pods store "alpha")))
+        (is (every #'gr8s.kubelet::deletion-requested-p pods))
+        (is (notany (lambda (pod) (equal "busybox:2" (stateful-pod-image store (pod-name pod)))) pods)))
+      (flet ((progressing ()
+               (find "Progressing" (gethash "conditions" (gethash "status" (gr8s.resources::get-core-resource
+                                                                             store "statefulsets" "alpha" "web"))
+                                            #())
+                     :test #'equal :key (lambda (condition) (gethash "type" condition)))))
+        (is (equal "RecreateInProgress" (gethash "reason" (progressing))))
+        (is (equal "True" (gethash "status" (progressing))))
+        (stateful-settle reconciler)
+        (dolist (name '("web-0" "web-1" "web-2")) (is (equal "busybox:2" (stateful-pod-image store name))))
+        (let ((status (gethash "status" (gr8s.resources::get-core-resource store "statefulsets" "alpha" "web"))))
+          (is (equal (gethash "updateRevision" status) (gethash "currentRevision" status)))
+          (is (= 3 (gethash "currentReplicas" status))))
+        (is (equal "RecreateCompleted" (gethash "reason" (progressing))))
+        (is (equal "False" (gethash "status" (progressing)))))
+      ;; A Pod still terminating holds the new revision back.
+      (gr8s.resources::create-core-resource store "statefulsets" (stateful-fixture "db" :replicas 2 :update-type "Recreate") "alpha")
+      (stateful-settle reconciler)
+      (dolist (name '("db-0" "db-1"))
+        (gr8s.store::mark-pod-deleting store "alpha" name :grace-period 30))
+      (stateful-set-image store "db" "busybox:2")
+      (gr8s.controllers::reconcile-workloads reconciler)
+      ;; (The test runtime finishes those deletions within the pass; what matters is that the
+      ;; pass that saw them terminating made no new-revision Pod.)
+      (let ((pods (remove-if-not (lambda (pod) (uiop:string-prefix-p "db-" (pod-name pod))) (list-pods store "alpha"))))
+        (is (every #'gr8s.kubelet::deletion-requested-p pods))
+        (is (notany (lambda (pod) (equal "busybox:2" (stateful-pod-image store (pod-name pod)))) pods)))
+      ;; rollingUpdate belongs to RollingUpdate alone.
+      (let ((fixture (stateful-fixture "other" :update-type "Recreate")))
+        (setf (gethash "rollingUpdate" (gethash "updateStrategy" (gethash "spec" fixture)))
+              (gr8s.resources::core-object "partition" 1))
+        (signals gr8s.model:kubernetes-error
+          (gr8s.resources::create-core-resource store "statefulsets" fixture "alpha")))))
+  ;; Before v1.38 the strategy doesn't exist.
+  (with-budget-cluster (store runtime reconciler)
+    (signals gr8s.model:kubernetes-error
+      (gr8s.resources::create-core-resource store "statefulsets" (stateful-fixture "web" :update-type "Recreate") "alpha"))))
+
 (test statefulset-adopts-orphans-and-releases-mismatches
   (with-budget-cluster (store runtime reconciler)
     (let ((set (gr8s.resources::create-core-resource store "statefulsets" (stateful-fixture "web" :replicas 1) "alpha")))

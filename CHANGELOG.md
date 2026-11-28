@@ -89,6 +89,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- StatefulSet `updateStrategy: Recreate`, for Kubernetes 1.38 (podster-i18c.5): every
+  old-revision Pod is deleted, and no new-revision Pod is made until none is left, so
+  the two never run at once; the `Progressing` condition reports `RecreateInProgress`
+  and then `RecreateCompleted`. It turns on with the move to 1.38, as upstream's
+  StatefulSetRecreateStrategy does.
 - Container `lifecycle.stopSignal`, for Kubernetes 1.38 (podster-i18c.4): kept and
   checked against the Pod's `spec.os.name`, passed to containerd as the container's stop
   signal, and reported in `status.containerStatuses[].stopSignal`. It turns on with the
