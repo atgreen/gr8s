@@ -33,6 +33,9 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- Editing only the browser-node page or runtime, or a dashboard page, rebuilds the
+  file that embeds it (podster-qihf). ASDF doesn't count a `:static-file` dependency
+  as making a fasl stale, so `make native` kept serving the old copy.
 - `gr8s dashboard` no longer quits when the API server is slow to answer
   (podster-iumy). A read that ran out of time ended the dashboard with "Unhandled
   TIMEOUT in thread gr8s network favicons": SBCL's timeout isn't an error, so the

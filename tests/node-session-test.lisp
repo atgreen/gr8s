@@ -2387,6 +2387,24 @@ Returns the server's next message."
         (hunchentoot:stop listener)
         (gr8s.apiserver::stop-node-grpc-server server)))))
 
+(test files-that-embed-pages-rebuild-when-a-page-changes
+  ;; podster-qihf: browser-nodes.lisp and the dashboard files read their pages at compile
+  ;; time, so each page must be an input of their compile, or editing only the page left
+  ;; the old copy built in.
+  (labels ((find-source (component name)
+             (if (typep component 'asdf:parent-component)
+                 (some (lambda (child) (find-source child name)) (asdf:component-children component))
+                 (and (equal name (asdf:component-name component))
+                      (typep component 'asdf:cl-source-file) component))))
+    (loop for (name . pages) in '(("browser-nodes" "browser-node.html" "browser-node-runtime.mjs")
+                                  ("dashboard-agent" "dashboard-agent.html")
+                                  ("dashboard-lisp" "dashboard-lisp.html")
+                                  ("dashboard-network" "dashboard-network.html"))
+          for component = (find-source (asdf:find-system "gr8s") name)
+          for inputs = (mapcar #'file-namestring (asdf:input-files 'asdf:compile-op component))
+          do (dolist (page pages)
+               (is (member page inputs :test #'equal) "~A's compile reads ~A" name page)))))
+
 (test browser-tabs-always-load-the-runtime-the-server-runs
   ;; After an upgrade, a reloaded tab must run the new runtime (podster-w22b): the page
   ;; is never cached and loads the runtime at a URL naming its content hash.
