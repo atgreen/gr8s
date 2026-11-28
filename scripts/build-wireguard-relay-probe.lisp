@@ -15,12 +15,8 @@
            (let ((channel
                    (gr8s.network::ensure-wireguard-relay-server-channel
                     server "node-a" "node-b" (get-universal-time))))
-             (gr8s.network::authorize-wireguard-relay-node
-              (gr8s.network::wireguard-relay-server-coordinator server)
-              channel "node-a" "198.18.1.2" (get-universal-time))
-             (gr8s.network::authorize-wireguard-relay-node
-              (gr8s.network::wireguard-relay-server-coordinator server)
-              channel "node-b" "198.18.1.3" (get-universal-time))
+             ;; No pre-authorization: the relay learns each side's source from its
+             ;; first packet (first-seen, sticky; #345).
              (format t "relay-ready ~{~D~^ ~}~%"
                      (gr8s.network::wireguard-relay-channel-ports channel))
              (finish-output)
