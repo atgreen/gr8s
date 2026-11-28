@@ -98,6 +98,32 @@ and which addresses its Pods have, by Pod uid."
                     do (return (setf (gethash uid (browser-network-addresses network)) address))
                   finally (error 'runtime-error :message "The browser node's Pod CIDR is full")))))))
 
+(defun seed-browser-network-addresses (network store node-name)
+  "Give the Pods bound to NODE-NAME in STORE back the addresses they had on NETWORK: each
+keeps its last observed podIP when that is one of NETWORK's Pod addresses and no other Pod
+has it yet. A restarted server hands out addresses afresh, so a tab that rejoins with its
+Pods still running found them given to other Pods, and their own gone (podster-r34s)."
+  (multiple-value-bind (base prefix) (parse-ipv4-cidr (browser-network-cidr network))
+    (let ((last (+ base (1- (expt 2 (- 32 prefix))) -1))
+          (kept (with-store-lock (store)
+                  (loop for pod being the hash-values of (gr8s.store:pod-store-pods store)
+                        for status = (and (equal node-name (gr8s.model::pod-node-name pod))
+                                          (gethash (gr8s.model::pod-uid pod)
+                                                   (gr8s.store:pod-store-pod-observed-statuses store)))
+                        for address = (and (hash-table-p status) (gethash "podIP" status))
+                        when (stringp address)
+                          collect (cons (gr8s.model::pod-uid pod) address)))))
+      (bt:with-lock-held ((browser-network-lock network))
+        (loop for (uid . address) in kept
+              for integer = (ignore-errors (parse-ipv4-cidr (format nil "~A/32" address)))
+              when (and integer (<= (+ base 2) integer last)
+                        (not (gethash uid (browser-network-addresses network)))
+                        (not (find address (loop for taken being the hash-values of (browser-network-addresses network)
+                                                 collect taken)
+                                   :test #'equal)))
+                do (setf (gethash uid (browser-network-addresses network)) address)))
+      network)))
+
 (defun release-browser-network-address (network uid)
   (bt:with-lock-held ((browser-network-lock network))
     (remhash uid (browser-network-addresses network))))

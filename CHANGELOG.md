@@ -33,6 +33,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- A browser tab that rejoins after a server restart keeps its running Pods'
+  addresses (podster-r34s). The server's address table was in memory only, so it
+  handed them out afresh: the tab's Pods reported no podIP, Services lost them, and
+  a new Pod could get an address a running one held. Each Pod now gets back the
+  address it last reported.
 - Editing only the browser-node page or runtime, or a dashboard page, rebuilds the
   file that embeds it (podster-qihf). ASDF doesn't count a `:static-file` dependency
   as making a fasl stale, so `make native` kept serving the old copy.
