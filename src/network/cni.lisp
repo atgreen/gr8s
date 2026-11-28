@@ -22,6 +22,12 @@
 
 (in-package #:gr8s.network)
 
+;; Special before their first use here, which is compiled before their definitions: a
+;; LET of one would otherwise bind it lexically, and a read warns (podster-8o0k).
+(defvar *service-nat-stage-programs*) ; defined in service-nat-guard.lisp
+(defvar +flow-config-map-name+) ; defined in egress-guard.lisp
+(defvar +flow-events-map-name+) ; defined in egress-guard.lisp
+
 #+sbcl
 (sb-alien:define-alien-routine ("setns" %linux-setns) sb-alien:int
   (fd sb-alien:int)

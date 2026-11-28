@@ -86,6 +86,8 @@ jobs:
         env:
           CL_SOURCE_REGISTRY: "${{ github.workspace }}/:${{ github.workspace }}/ocicl//:"
         run: |
+          # Fail on any undefined function or variable in gr8s's own code (podster-8o0k).
+          make check-undefined
           make test
           make test-service-lb-program
           make test-service-packet-program

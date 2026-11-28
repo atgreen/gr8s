@@ -27,6 +27,12 @@
 
 (in-package #:gr8s.controllers)
 
+;; Special before their first use here, which is compiled before their definitions: a
+;; LET of one would otherwise bind it lexically, and a read warns (podster-8o0k).
+(defvar *cm-acme-clients*) ; defined in further down this file
+(defvar *cm-acme-lock*) ; defined in further down this file
+(defvar *cm-acme-orders*) ; defined in further down this file
+
 (defparameter *cm-acme-backend* :pure-tls
   "What the acme issuer talks to. :pure-tls is the real client; tests bind an
    object with their own methods on the CM-ACME-* generic functions.")

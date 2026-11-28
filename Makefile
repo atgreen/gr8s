@@ -31,7 +31,7 @@ TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 OCICL ?= ocicl
 OCICL_STAMP := ocicl/.ocicl-installed
 
-.PHONY: xterm-assets graph-assets dashboard-assets-from-source dashboard-assets-compress test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol lint test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
+.PHONY: xterm-assets graph-assets dashboard-assets-from-source dashboard-assets-compress test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol lint check-undefined test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
 
 all: native
 
@@ -290,6 +290,11 @@ test-core-recovery-memory:
 # argument doesn't reach its subdirectories.
 lint:
 	ocicl lint $$(find src tests scripts -name '*.lisp' | sort)
+
+# Recompile gr8s and its tests from source, failing on any undefined function or variable
+# the compiler reports in gr8s's own files.
+check-undefined: generate-protocol
+	$(SBCL) --noinform $(LISP_BOOTSTRAP) --non-interactive --eval '(require :asdf)' --load scripts/check-undefined.lisp
 
 test: generate-protocol
 	python3 scripts/test-bootstrap.py
