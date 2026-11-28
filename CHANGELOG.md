@@ -49,6 +49,10 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- The join page keeps its device's screen awake while the tab is a node
+  (podster-2yfv), so a phone or laptop that would lock and sleep stays in the
+  cluster. The browser lets go of the lock while the page is hidden, and the page
+  takes it again when shown. Its "screen" fact shows whether it holds one.
 - Browser joins wait for the server's headroom (podster-vyec). While its spare
   memory is under a reserve (`--browser-memory-reserve-mib`, 1 GiB) a tab is
   refused. While its CPUs have been over 90% busy (`--browser-busy-above`, not

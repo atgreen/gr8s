@@ -2266,6 +2266,23 @@ Returns the server's next message."
           ;; Other peers are unaffected.
           (is (eq t (gethash "other" result)))))))
 
+(test the-join-page-keeps-its-screen-awake
+  ;; podster-2yfv: a node's page holds a screen wake lock, takes it again when shown after
+  ;; the browser let it go, releases it on leaving, and does nothing without the API.
+  (let ((output (ignore-errors
+                 (uiop:run-program (list "node" (namestring (asdf:system-relative-pathname
+                                                             "gr8s" "tests/browser-node/wake-lock-check.mjs")))
+                                   :output :string :error-output nil))))
+    (if (null output)
+        (skip "node is not available to run the page's wake lock")
+        (let ((result (com.inuoe.jzon:parse output)))
+          ;; Each step: its label, the lock's state, requests made so far, whether one is held.
+          (is (equal '(("made" "off" 0 nil) ("joined" "held" 1 t) ("hidden" "released" 1 nil)
+                       ("shown" "held" 2 t) ("left" "off" 2 nil) ("shown after leaving" "off" 2 nil))
+                     (map 'list (lambda (step) (coerce step 'list)) (gethash "steps" result))))
+          (is (equalp #("unsupported") (gethash "unsupported" result)))
+          (is (equalp #("refused") (gethash "refused" result)))))))
+
 (test browser-tabs-translate-services-their-pods-use
   ;; A browser Pod's sockets are in its VM, so its tab translates ClusterIPs
   ;; (podster-kw5u): the server tells it the Service ranges, and a Service port's ready

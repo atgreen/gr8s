@@ -110,6 +110,7 @@
         <span class="fact">runtime <b>unkernel</b></span>
         <span class="fact">Pod CIDR <b id="cidr">—</b></span>
         <span class="fact">up <b id="uptime">0s</b></span>
+        <span class="fact">screen <b id="wake">—</b></span>
       </div>
     </div>
     <button id="leave">Leave the cluster</button>
@@ -153,7 +154,7 @@
 </div>
 
 <script type="module">
-  import { joinCluster } from "./browser-node-runtime.mjs";
+  import { joinCluster, screenWakeLock } from "./browser-node-runtime.mjs";
   const SDK = "https://cdn.jsdelivr.net/npm/unkernel@0.2.0-261126-fd204d3/dist/web.mjs";
   const $ = (id) => document.getElementById(id);
   const esc = (text) => String(text ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -342,7 +343,20 @@
     const name = await node.node;
     $("node").textContent = name;
     log(`this tab is node ${name}`);
+    // A node keeps its screen awake, or a phone that locks takes it out of the cluster.
+    const wake = screenWakeLock({
+      onChange: (state) => {
+        $("wake").textContent = { held: "kept awake", released: "may sleep", refused: "may sleep",
+                                  unsupported: "may sleep", off: "—" }[state];
+        $("wake").title = { held: "This tab holds a screen wake lock while it is a node.",
+                            released: "The browser let go of the wake lock; it is taken again when this page is shown.",
+                            refused: "The browser refused a screen wake lock.",
+                            unsupported: "This browser has no Screen Wake Lock API.", off: "" }[state];
+      },
+    });
+    await wake.hold();
     await node.closed;
+    await wake.release();
     if (leaving) gone(); else await rejoinWhenBack();
   }
   // A busy server asks the tab to wait: try again later, waiting longer each time.
