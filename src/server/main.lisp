@@ -4813,6 +4813,9 @@ and refuses every public registry (podster-8ak). Returns the bundle named, or NI
       (funcall cni-entry)
       (handler-case
           (let ((options (parse-cli-options arguments)))
+            ;; The dashboard runs for hours too, with threads that read the API on timers.
+            (when (eq (getf options :command) :dashboard)
+              (install-stale-timeout-guard))
             (when (member (getf options :command) '(:serve :agent :witness))
               (print-gr8s-banner (case (getf options :command)
                                    (:serve "control plane")

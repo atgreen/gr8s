@@ -28,7 +28,15 @@ first file that exists, then ~/.kube/config), else, on a control-plane member, t
 
 (defun doctor-api-get (config target &key (limit +doctor-api-response-limit+) (seconds +doctor-api-request-seconds+))
   "GET TARGET on CONFIG's server. Return (values body-octets status headers), bounded in time
-by SECONDS and in size by LIMIT octets."
+by SECONDS and in size by LIMIT octets. Running out of time is an ERROR, which callers'
+IGNORE-ERRORS handles: SBCL's own timeout is a serious condition no IGNORE-ERRORS catches, and
+one left unhandled in a dashboard thread ended the dashboard."
+  (handler-case (doctor-api-get-within config target limit seconds)
+    (sb-ext:timeout ()
+      (error "no answer from ~A within ~D seconds" (getf config :server) seconds))))
+
+(defun doctor-api-get-within (config target limit seconds)
+  "DOCTOR-API-GET's request, abandoned with SB-EXT:TIMEOUT after SECONDS."
   (sb-ext:with-timeout seconds
     (multiple-value-bind (stream socket host port base-path) (open-debug-api-stream config)
       (unwind-protect
