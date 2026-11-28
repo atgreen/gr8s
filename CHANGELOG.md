@@ -23,6 +23,13 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- An idle HA member no longer spends most of a core checking Raft peer
+  certificates (podster-480g). Every Raft message, and every node operation relayed
+  between members, verified the peer's certificate again with two ECDSA checks,
+  though the TLS handshake had already done so. A certificate verified under the
+  cluster's CA now stands for a minute, never past its notAfter. Relayed node
+  operations (logs, exec, the API's proxy to Pods) queued behind those checks and
+  could time out.
 - `/metrics` no longer fails once a node that reported its dataplane is deleted
   (podster-iha8). Every scrape answered 404 "Node … was not found" after a browser
   node's tab closed. A deleted node's last report is now let go.

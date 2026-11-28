@@ -359,3 +359,42 @@
     (is (equal '(1 2) (multiple-value-list (gr8s.security::with-tls-handshake-deadline (5) (values 1 2)))))
     (signals gr8s.security::tls-handshake-timeout
       (gr8s.security::with-tls-handshake-deadline (0.05) (sleep 2)))))
+
+(test a-verified-raft-peer-certificate-stands-for-a-while
+  ;; podster-480g: every Raft message was authenticated with two ECDSA checks of the
+  ;; peer's certificate, the busiest work of an idle member. A certificate verified under
+  ;; a CA stands for a minute, never past its notAfter; a stranger's is still refused.
+  (let* ((root (merge-pathnames (format nil "raft-peer-~36R/" (random (expt 36 8))) (uiop:temporary-directory)))
+         (credentials (gr8s.security::ensure-raft-founder-credentials root "member-a"))
+         (ca (gr8s.security::raft-credentials-ca credentials))
+         (certificate (first (pure-tls:load-certificate-chain
+                              (gr8s.security::raft-member-certificate-path root))))
+         (checks 0)
+         (verify (fdefinition 'gr8s.security::verify-raft-peer-certificate)))
+    (unwind-protect
+         (progn
+           (clrhash gr8s.security::*raft-peer-verifications*)
+           (setf (fdefinition 'gr8s.security::verify-raft-peer-certificate)
+                 (lambda (&rest arguments) (incf checks) (apply verify arguments)))
+           (is (equal "member-a" (gr8s.security::raft-peer-member certificate ca :now 1000)))
+           (is (equal "member-a" (gr8s.security::raft-peer-member certificate ca :now 1059)))
+           (is (= 1 checks))
+           (is (equal "member-a" (gr8s.security::raft-peer-member certificate ca :now 1060)))
+           (is (= 2 checks))
+           ;; A verification stands no later than the certificate's own notAfter.
+           (let ((not-after (pure-tls:certificate-not-after certificate)))
+             (clrhash gr8s.security::*raft-peer-verifications*)
+             (gr8s.security::raft-peer-member certificate ca :now (- not-after 10))
+             (gr8s.security::raft-peer-member certificate ca :now (- not-after 1))
+             (is (= 3 checks))
+             (gr8s.security::raft-peer-member certificate ca :now not-after)
+             (is (= 4 checks)))
+           ;; A certificate the CA didn't sign is refused, and not remembered.
+           (let ((other (first (pure-tls:load-certificate-chain
+                                (gr8s.security::cluster-pki-ca-certificate-path
+                                 (gr8s.security::ensure-cluster-pki (merge-pathnames "other/" root)))))))
+             (signals error (gr8s.security::raft-peer-member other ca :now 1000))
+             (signals error (gr8s.security::raft-peer-member other ca :now 1001))))
+      (setf (fdefinition 'gr8s.security::verify-raft-peer-certificate) verify)
+      (clrhash gr8s.security::*raft-peer-verifications*)
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
