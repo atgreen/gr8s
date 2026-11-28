@@ -1,0 +1,103 @@
+{
+  "metadata": {
+    "name": "gr8-claude-abcde",
+    "namespace": "gr8-alice",
+    "labels": {
+      "app.kubernetes.io/managed-by": "gr8",
+      "gr8s.io/gr8-command": "claude",
+      "gr8s.io/gr8-run": "gr8-claude-abcde",
+      "gr8s.io/gr8-user": "alice"
+    }
+  },
+  "spec": {
+    "volumes": [
+      {
+        "name": "host",
+        "hostPath": {
+          "path": "/",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "egress-trust",
+        "projected": {
+          "sources": [
+            {
+              "clusterTrustBundle": {
+                "name": "gr8s-egress",
+                "optional": true,
+                "path": "egress-ca.pem"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "command",
+        "image": "registry.k8s.io/pause:3.10",
+        "command": [
+          "/host/usr/bin/gr8",
+          "--internal",
+          "hold"
+        ],
+        "resources": {
+          "limits": {
+            "gr8s.io/dri": "1",
+            "memory": "1Gi"
+          },
+          "requests": {
+            "cpu": "1"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "host",
+            "mountPath": "/host"
+          },
+          {
+            "name": "egress-trust",
+            "readOnly": true,
+            "mountPath": "/gr8-trust"
+          }
+        ],
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "allowPrivilegeEscalation": false
+        }
+      }
+    ],
+    "restartPolicy": "Never",
+    "terminationGracePeriodSeconds": 1,
+    "automountServiceAccountToken": false,
+    "nodeName": "gr8-local",
+    "securityContext": {
+      "runAsUser": 1000,
+      "runAsGroup": 1000,
+      "supplementalGroups": [
+        10
+      ],
+      "sysctls": [
+        {
+          "name": "net.ipv4.ping_group_range",
+          "value": "0 2147483647"
+        }
+      ],
+      "seccompProfile": {
+        "type": "Unconfined"
+      }
+    },
+    "readinessGates": [
+      {
+        "conditionType": "gr8s.io/NetworkReady"
+      }
+    ],
+    "enableServiceLinks": false
+  },
+  "status": {}
+}

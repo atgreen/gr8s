@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -131,7 +133,11 @@ func setupAsRoot() error {
 		return err
 	}
 	identity, namespace := "gr8:"+user, UserNamespace(user)
-	if err := ensureUserNamespace(ctx, clientset, namespace, os.Getenv("SUDO_UID")); err != nil {
+	owner, err := setupOwner(identity, os.Getenv("SUDO_UID"))
+	if err != nil {
+		return err
+	}
+	if err := ensureUserNamespace(ctx, clientset, namespace, owner); err != nil {
 		return err
 	}
 	if err := applySetupRBAC(ctx, clientset, identity, namespace); err != nil {
@@ -157,9 +163,30 @@ func UserNamespace(user string) string {
 	return "gr8-" + strings.ReplaceAll(user, "_", "-")
 }
 
-// ensureUserNamespace makes NAMESPACE, recording the UID of the user it belongs to
-// for the server's checks on what runs there (podster-tcr8).
-func ensureUserNamespace(ctx context.Context, clientset kubernetes.Interface, name, uid string) error {
+// setupOwner is what a user's namespace records about them for the server's checks
+// (podster-tcr8): who they are, and the UID and groups every Pod there must run with.
+func setupOwner(identity, uid string) (map[string]string, error) {
+	account, err := user.LookupId(uid)
+	if err != nil {
+		return nil, fmt.Errorf("looking up UID %s: %w", uid, err)
+	}
+	groups, err := account.GroupIds()
+	if err != nil {
+		return nil, fmt.Errorf("the groups of %s: %w", account.Username, err)
+	}
+	if !slices.Contains(groups, account.Gid) {
+		groups = append([]string{account.Gid}, groups...)
+	}
+	return map[string]string{
+		OwnerAnnotation:     identity,
+		OwnerUIDAnnotation:  uid,
+		OwnerGIDsAnnotation: strings.Join(groups, ","),
+	}, nil
+}
+
+// ensureUserNamespace makes NAMESPACE with OWNER's annotations, or brings an existing
+// one's up to date.
+func ensureUserNamespace(ctx context.Context, clientset kubernetes.Interface, name string, owner map[string]string) error {
 	namespaces := clientset.CoreV1().Namespaces()
 	namespace, err := namespaces.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -168,19 +195,29 @@ func ensureUserNamespace(ctx context.Context, clientset kubernetes.Interface, na
 	if err != nil {
 		return fmt.Errorf("namespace %s: %w", name, err)
 	}
-	if namespace.Annotations[OwnerUIDAnnotation] == uid {
-		return nil
-	}
 	if namespace.Annotations == nil {
 		namespace.Annotations = map[string]string{}
 	}
-	namespace.Annotations[OwnerUIDAnnotation] = uid
+	changed := false
+	for key, value := range owner {
+		if namespace.Annotations[key] != value {
+			namespace.Annotations[key], changed = value, true
+		}
+	}
+	if !changed {
+		return nil
+	}
 	_, err = namespaces.Update(ctx, namespace, metav1.UpdateOptions{})
 	return err
 }
 
-// OwnerUIDAnnotation names the UID of the user a gr8 namespace belongs to.
-const OwnerUIDAnnotation = "gr8s.io/gr8-uid"
+// The annotations naming whom a gr8 user's namespace belongs to; the server holds
+// what runs there, and what its owner makes cluster-wide, to them.
+const (
+	OwnerAnnotation     = "gr8s.io/gr8-owner"
+	OwnerUIDAnnotation  = "gr8s.io/gr8-uid"
+	OwnerGIDsAnnotation = "gr8s.io/gr8-gids"
+)
 
 // WithNamespace is KUBECONFIG with its current context's namespace set to NAMESPACE.
 func WithNamespace(kubeconfig []byte, namespace string) ([]byte, error) {

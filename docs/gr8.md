@@ -76,13 +76,18 @@ reads `~/.config/gr8/kubeconfig` after `--kubeconfig` and `$KUBECONFIG` and befo
 `~/.kube/config`, so an existing kubectl setup is left as it is. Running setup
 again renews the grant and the file.
 
-**Setup is for users who already have sudo.** The credential is not the
-administrator's: it can't read other users' namespaces or change RBAC. But gr8's
-namespaces allow the privileged Pods gr8 makes, and the server doesn't yet tie a
-Pod there to its owner's UID, so whoever can create Pods in one can become root on
-the node. ClusterNetworkPolicies and SandboxProfiles are cluster-wide, so one
-user can also widen another's runs. The server-side checks that close both are
-podster-tcr8; until they land, don't grant gr8 to a user you wouldn't give sudo.
+**What keeps users apart.** Setup records on `gr8-YOU` who owns it: your
+identity, UID and groups (`gr8s.io/gr8-owner`, `gr8s.io/gr8-uid`,
+`gr8s.io/gr8-gids`). gr8's namespaces have to admit privileged Pods, since gr8
+mounts the host's `/`, so the server holds every Pod in one to what makes that
+safe: it must run as the owner's UID and within their groups, may not escalate
+privilege (so no setuid program under `/` runs as root), drops all capabilities,
+and uses no host network, PID or IPC namespace, host port, other sysctl, SELinux
+options or RuntimeClass. With `/` mounted, such a Pod can do what you can do on
+the host, and no more. A user `gr8:NAME` may make a ClusterNetworkPolicy or
+SandboxProfile only for the Pods of a namespace of their own, named by
+`kubernetes.io/metadata.name`, so one user can't widen another's runs. Setup itself
+still runs sudo, so it is for users who have it.
 
 A machine that runs `gr8s-agent` is part of a cluster elsewhere; setup refuses
 there.

@@ -111,6 +111,12 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 				Image:     request.Image,
 				Command:   []string{HostRoot + request.Launcher, sandbox.Internal, "hold"},
 				Resources: withGPU(request.Resources, request.GPU),
+				// No setuid program under the host's /, and no capability, makes the
+				// command more than the user it runs as (podster-tcr8).
+				SecurityContext: &corev1.SecurityContext{
+					AllowPrivilegeEscalation: ptr(false),
+					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "host", MountPath: HostRoot},
 					{Name: "egress-trust", MountPath: TrustMount, ReadOnly: true},
