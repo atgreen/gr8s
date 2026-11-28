@@ -1982,7 +1982,11 @@ Returns the server's next message."
                  (pod-on name "closed")
                  (is-true (probe-file (merge-pathnames (format nil "virtual/~A/" name) path)))
                  (usocket:socket-close socket)
-                 (is-true (wait-until (lambda () (and (null (node-p name)) (pod-gone-p "closed"))) :timeout 5))
+                 ;; The host lets the node go after its Node and Pods: wait for all of it.
+                 (is-true (wait-until (lambda () (and (null (node-p name)) (pod-gone-p "closed")
+                                                      (null (gr8s.server::virtual-node-names host))
+                                                      (null (probe-file (merge-pathnames (format nil "virtual/~A/" name) path)))))
+                                      :timeout 5))
                  (is (null (gr8s.server::virtual-node-names host)))
                  (is (null (probe-file (merge-pathnames (format nil "virtual/~A/" name) path)))))
                ;; A tab that stops answering, its connection still open.
