@@ -679,8 +679,8 @@
 (test containerds-state-goes-to-memory-unless-running-containers-use-it-on-disk
   ;; podster-j9gd: the state holds each container's OCI spec, env vars and the Secret
   ;; values among them, so it belongs on a tmpfs, as stock containerd keeps it in /run.
-  (let* ((root (uiop:ensure-directory-pathname
-                (format nil "/home/green/git/gr8s/build/state-test-~36R" (random (expt 36 8)))))
+  (let* ((root (merge-pathnames (format nil "gr8s-state-test-~36R/" (random (expt 36 8)))
+                               (uiop:temporary-directory)))
          (manager (gr8s.kubelet::make-managed-containerd
                    :state-directory (namestring root) :executable "/opt/gr8s/bin/containerd"
                    :oci-runtime "/opt/gr8s/bin/runc" :cni-bin-directory "/opt/gr8s/bin/cni/"
