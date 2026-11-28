@@ -359,7 +359,7 @@ Named, as OTel's HTTP conventions ask, by the method and the route that matched.
             (when (streamp upstream) (ignore-errors (close upstream)))))
       (error (condition)
         (if hunchentoot::*headers-sent*
-            (error condition)
+            (progn (gr8s.apiserver::abandon-sent-reply) (error condition))
             (gateway-error-response 502 "the gateway backend connection failed: ~A" condition))))))
 
 ;;; ---------------------------------------------------------------------------
@@ -440,7 +440,7 @@ Named, as OTel's HTTP conventions ask, by the method and the route that matched.
       (error (condition)
         (when socket (ignore-errors (usocket:socket-close socket)))
         (if hunchentoot::*headers-sent*
-            (error condition)
+            (progn (gr8s.apiserver::abandon-sent-reply) (error condition))
             (gateway-error-response 502 "the gateway backend connection failed: ~A" condition))))))
 
 ;;; ---------------------------------------------------------------------------
