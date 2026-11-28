@@ -294,24 +294,56 @@ one fails once its certificate expires and is then opened again with the new one
           :tls-ca-certificate
           (pure-tls::make-trust-store :certificates (list (raft-credentials-ca credentials))))))
 
+(defun verify-raft-peer-certificate (certificate ca)
+  "Return the member CERTIFICATE names, checked against the cluster's Raft CA, or signal."
+  (require-internal-certificate-profile certificate ca)
+  (handler-case
+      (pure-tls::verify-certificate-chain (list certificate) (list ca)
+                                          :purpose :client-auth :trust-anchor-mode :replace)
+    (error (condition)
+      (pki-fail "untrusted-member" "Raft member certificate isn't trusted: ~A" condition)))
+  (let ((names (pure-tls:certificate-subject-common-names certificate)))
+    (unless (= 1 (length names))
+      (pki-fail "untrusted-member" "Raft member certificate must name one member"))
+    (first names)))
+
+(defparameter +raft-peer-verification-seconds+ 60
+  "How long a verified Raft peer certificate is taken as verified without checking again.")
+
+(defvar *raft-peer-verifications* (make-hash-table :test #'equalp :synchronized t)
+  "Raft peer certificates verified lately: by the certificate's and the CA's DER, the member
+each names and until when the verification stands.")
+
+(defun raft-peer-member (certificate ca &key (now (get-universal-time)))
+  "The member CERTIFICATE names, verified against CA, or signal. Each Raft message is
+authenticated, several a second from each peer, and verifying a certificate is two ECDSA
+checks: one that passed stands for +RAFT-PEER-VERIFICATION-SECONDS+, never past the
+certificate's notAfter, for the same certificate under the same CA."
+  (let* ((key (concatenate '(vector (unsigned-byte 8))
+                           (pure-tls::x509-certificate-raw-der certificate)
+                           (pure-tls::x509-certificate-raw-der ca)))
+         (known (gethash key *raft-peer-verifications*)))
+    (if (and known (< now (cdr known)))
+        (car known)
+        (let ((member (verify-raft-peer-certificate certificate ca)))
+          ;; Certificates rotate: let go of what has lapsed before remembering more.
+          (when (> (hash-table-count *raft-peer-verifications*) 64)
+            (loop for old being the hash-keys of *raft-peer-verifications* using (hash-value entry)
+                  unless (< now (cdr entry)) do (remhash old *raft-peer-verifications*)))
+          (setf (gethash key *raft-peer-verifications*)
+                (cons member (min (+ now +raft-peer-verification-seconds+)
+                                  (or (ignore-errors (pure-tls:certificate-not-after certificate))
+                                      now))))
+          member))))
+
 (defun authenticate-raft-peer (credentials context)
   "Return the member id in the verified client certificate on CONTEXT's connection, or signal."
   (let* ((stream (ag-http2:connection-stream (ag-grpc::context-connection context)))
          (certificate (and (typep stream 'pure-tls::tls-stream)
-                           (pure-tls:tls-peer-certificate stream)))
-         (ca (raft-credentials-ca credentials)))
+                           (pure-tls:tls-peer-certificate stream))))
     (unless certificate
       (pki-fail "unauthenticated-member" "Raft requests require a member certificate"))
-    (require-internal-certificate-profile certificate ca)
-    (handler-case
-        (pure-tls::verify-certificate-chain (list certificate) (list ca)
-                                            :purpose :client-auth :trust-anchor-mode :replace)
-      (error (condition)
-        (pki-fail "untrusted-member" "Raft member certificate isn't trusted: ~A" condition)))
-    (let ((names (pure-tls:certificate-subject-common-names certificate)))
-      (unless (= 1 (length names))
-        (pki-fail "untrusted-member" "Raft member certificate must name one member"))
-      (first names))))
+    (raft-peer-member certificate (raft-credentials-ca credentials))))
 
 (defun authenticated-raft-message (credentials request context)
   "Decode a delivered message, first authenticating its sender when this member uses TLS."
