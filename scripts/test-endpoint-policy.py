@@ -792,6 +792,18 @@ def main(path, kernel=False):
     inbound(datagram(other, IP, UDP, 6000, 7000), True)
     check(datagram(IP, other, UDP, 7000, 6000), True)
     check(datagram(IP, other, UDP, 7001, 6000), False, 'policy')
+    # The node reaches its Pods from the node gateway (a probe, the Gateway, a curl on
+    # the node): outside isolation and unreported, but the egress-isolated Pod's replies
+    # to it pass, while its own new connections to the gateway don't (podster-zx0m).
+    backend.update('flow_config', struct.pack('<I', 0), struct.pack('<I', 1))
+    assert not [event for event in inbound(datagram(GATEWAY, IP, TCP, 50000, 8080), True)
+                if event['kind'] == 2], 'the node gateway is reported'
+    backend.update('flow_config', struct.pack('<I', 0), struct.pack('<I', 0))
+    check(datagram(IP, GATEWAY, TCP, 8080, 50000), True)
+    check(datagram(IP, GATEWAY, TCP, 8081, 50000), False, 'policy')
+    inbound(datagram6(GATEWAY6, IP6, TCP, 50001, 8080), True)
+    check(datagram6(IP6, GATEWAY6, TCP, 8080, 50001), True)
+    check(datagram6(IP6, GATEWAY6, TCP, 8081, 50001), False, 'policy')
     # A connection's replies stop passing once it has been idle past its lifetime.
     if backend.advance(181):
         check(datagram(IP, other, UDP, 7000, 6000), False, 'policy')

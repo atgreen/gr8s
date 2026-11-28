@@ -553,11 +553,18 @@
               (egress-mode (map-lookup netpol-mode 0))
               (ingress-mode (map-lookup netpol-mode 1))
               (reporting (map-lookup flow-config 0)))
-          (when (and (= ipv4 1) (/= (ntohl peer) #xa9fe0101))
+          ;; The node reaches its Pods from the node gateway, 169.254.1.1: a probe, the
+          ;; Gateway, a curl on the node. That is outside Pod isolation and isn't
+          ;; reported, but an egress-isolated Pod still answers it, and its reply must pass
+          ;; as the answer to an accepted connection, so the connection is recorded
+          ;; (podster-zx0m). The Pod's own new connections to the gateway, node DNS among
+          ;; them, match no such record and remain its egress policy's to decide.
+          (when (= ipv4 1)
             (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
                   (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0))
-                  (report-on u32 (if (/= reporting 0) (logand (load u32 reporting 0) 1) 0)))
-              (when (or (/= egress-on 0) (/= ingress-on 0) (/= report-on 0))
+                  (report-on u32 (if (/= reporting 0) (logand (load u32 reporting 0) 1) 0))
+                  (node u8 (if (= (ntohl peer) #xa9fe0101) 1 0)))
+              (when (or (/= egress-on 0) (and (= node 0) (or (/= ingress-on 0) (/= report-on 0))))
                 (let ((now u64 (ktime-get-ns)))
                   ;; Whistler builds a stack struct's address in r1 whatever r1 holds,
                   ;; so the key is made just after a helper call, when r1 is free.
@@ -566,7 +573,7 @@
                           (netpol-flow-key-pod-port fkey) dport
                           (netpol-flow-key-peer-port fkey) sport
                           (netpol-flow-key-proto fkey) proto)
-                    (when (/= ingress-on 0)
+                    (when (and (/= ingress-on 0) (= node 0))
                       (when (= (netpol-allowed netpol-ingress-cidr netpol-ingress-ports
                                                peer proto dport has-port)
                                0)
@@ -576,14 +583,14 @@
                             (drop-pod-packet :policy :flow fkey :family 4 :direction 2 :endpoint (ntohl pod-addr))))))
                     (let ((stamp (make-netpol-flow-stamp)))
                       (setf (netpol-flow-stamp-ns stamp) now)
-                      (record-netpol-flow netpol-flows fkey stamp opens :family 4 :direction 2 :endpoint (ntohl pod-addr))))))))
+                      (record-netpol-flow netpol-flows fkey stamp (if (/= node 0) 0 opens)
+                                          :family 4 :direction 2 :endpoint (ntohl pod-addr))))))))
           ;; fe80::1 is the node gateway on every routed Pod interface. As with
-          ;; 169.254.1.1 above, node-originated traffic is outside Pod isolation.
+          ;; 169.254.1.1 above, node-originated traffic is outside Pod isolation, and an
+          ;; egress-isolated Pod's connections from it are recorded (podster-zx0m).
           ;; Neighbor discovery and MLD from a link-local or unspecified source are
           ;; interface housekeeping, outside Pod isolation too (podster-6cy).
           (when (and (= ipv6 1)
-                     (not (and (= peer6-0 #x000080fe) (= peer6-1 0)
-                               (= peer6-2 0) (= peer6-3 #x01000000)))
                      (not (and (or (= proto 58) (= proto 0))
                                (or (= (logand peer6-0 #xc0ff) #x80fe)
                                    (and (= peer6-0 0) (= peer6-1 0) (= peer6-2 0) (= peer6-3 0))))))
@@ -595,8 +602,11 @@
                                        ;; from: that chatter is housekeeping, not a connection.
                                        (/= (logand peer6-0 #xc0ff) #x80fe)
                                        (or (/= peer6-0 0) (/= peer6-1 0) (/= peer6-2 0) (/= peer6-3 0)))
-                                  (logand (load u32 reporting 0) 1) 0)))
-              (when (or (/= egress-on 0) (/= ingress-on 0) (/= report-on 0))
+                                  (logand (load u32 reporting 0) 1) 0))
+                  (node u8 (if (and (= peer6-0 #x000080fe) (= peer6-1 0)
+                                    (= peer6-2 0) (= peer6-3 #x01000000))
+                               1 0)))
+              (when (or (/= egress-on 0) (and (= node 0) (or (/= ingress-on 0) (/= report-on 0))))
                 (let ((now u64 (ktime-get-ns))
                       (fkey (make-netpol-flow-key-v6)))
                   (setf (netpol-flow-key-v6-peer fkey 0) peer6-0
@@ -608,7 +618,7 @@
                         (netpol-flow-key-v6-proto fkey) proto
                         (netpol-flow-key-v6-pad0 fkey) 0
                         (netpol-flow-key-v6-pad1 fkey) 0)
-                  (when (/= ingress-on 0)
+                  (when (and (/= ingress-on 0) (= node 0))
                     (when (= (netpol-allowed-v6 netpol-ingress-cidr-v6 netpol-ingress-ports-v6
                                                 peer6-0 peer6-1 peer6-2 peer6-3
                                                 proto dport has-port)
@@ -619,5 +629,5 @@
                           (drop-pod-packet :policy :flow fkey :family 6 :direction 2 :endpoint 0)))))
                   (let ((stamp (make-netpol-flow-stamp)))
                     (setf (netpol-flow-stamp-ns stamp) now)
-                    (record-netpol-flow netpol-flows-v6 fkey stamp opens :family 6 :direction 2)))))))
+                    (record-netpol-flow netpol-flows-v6 fkey stamp (if (/= node 0) 0 opens) :family 6 :direction 2)))))))
         TC_ACT_OK))))

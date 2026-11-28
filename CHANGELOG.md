@@ -33,6 +33,14 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- An egress-only NetworkPolicy no longer cuts a Pod off from its own node
+  (podster-zx0m). The node reaches its Pods from the node gateway (169.254.1.1, or
+  fe80::1), which the ingress guard left unrecorded, so since egress policy started
+  governing the node (podster-5hv.10) the Pod's replies were refused as new
+  connections: probes, the Gateway and a curl on the node got no answer. Those
+  connections are now recorded, without being reported or checked against ingress
+  policy, so the replies pass; the Pod's own new connections to the gateway are
+  still its egress policy's to decide.
 - A Gateway or Pod-proxy reply whose body fails partway, after its head is sent, no
   longer ends as if it were whole (podster-ox5r). The proxy re-sends a chunked body
   chunked, and closing the stream wrote the terminating chunk, so a browser got a
