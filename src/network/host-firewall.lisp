@@ -25,6 +25,11 @@
 
 (in-package #:gr8s.network)
 
+;; Special before their first use here, which is compiled before their definitions: a
+;; LET of one would otherwise bind it lexically, and a read warns (podster-8o0k).
+(defvar gr8s.controllers::+node-port-minimum+) ; defined in controllers/services.lisp
+(defvar gr8s.controllers::+node-port-maximum+) ; defined in controllers/services.lisp
+
 (defparameter +node-vxlan-udp-port+ 4789
   "The VXLAN underlay UDP port gr8s uses (see create-node-vxlan's #(18 181)).")
 

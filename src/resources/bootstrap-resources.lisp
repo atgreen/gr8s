@@ -8,6 +8,10 @@
 
 (in-package #:gr8s.resources)
 
+;; Special before their first use here, which is compiled before their definitions: a
+;; LET of one would otherwise bind it lexically, and a read warns (podster-8o0k).
+(defvar *authenticated-api-identity*) ; defined in api-identity.lisp
+
 (defun bootstrap-string-array (value context &key nonempty)
   "Validate a JSON array of strings and optionally require at least one item."
   (unless (and (vectorp value) (not (stringp value))

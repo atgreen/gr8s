@@ -10,6 +10,10 @@
 
 (in-package #:gr8s.kubelet)
 
+;; Special before their first use here, which is compiled before their definitions: a
+;; LET of one would otherwise bind it lexically, and a read warns (podster-8o0k).
+(defvar *kubelet-instrumentation*) ; defined in further down this file
+
 ;;; Histograms, rendered as the Prometheus client renders them
 
 (defstruct (histogram (:constructor %make-histogram (bounds counts)))

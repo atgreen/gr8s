@@ -11,6 +11,10 @@
 
 (in-package #:gr8s.apiserver)
 
+;; Special before their first use here, which is compiled before their definitions: a
+;; LET of one would otherwise bind it lexically, and a read warns (podster-8o0k).
+(defvar gr8s.controllers::*workload-clock*) ; defined in controllers/workload-controller.lisp
+
 (defparameter +max-disrupted-pods+ 2000
   "Most evicted Pods a budget tracks at once, as upstream limits it.")
 

@@ -23,6 +23,10 @@
 
 (in-package #:gr8s.resources)
 
+;; Special before their first use here, which is compiled before their definitions: a
+;; LET of one would otherwise bind it lexically, and a read warns (podster-8o0k).
+(defvar *event-clock*) ; defined in events.lisp
+
 (defconstant +resource-history-bytes-version+ 2
   "Version of cached history weights; version 2 includes large-string GC pages.")
 

@@ -33,6 +33,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- An HA member that applies a replicated change gives the Events it records that
+  change's time, as intended, not its own clock (podster-8o0k). `*event-clock*` was
+  bound in a file compiled before its `defvar`, so the binding was lexical and had no
+  effect. Fourteen other variables were read before their definitions were compiled;
+  all are now declared special first, and CI fails on any undefined function or
+  variable (`make check-undefined`).
 - `gr8` run in a git worktree lets the command write the repository's shared git
   directory and its `.beads` database (podster-0ii.10). Neither is under the
   worktree: git couldn't commit, and `bd` silently started an empty database in the

@@ -20,6 +20,10 @@
 
 (in-package #:gr8s.apiserver)
 
+;; Special before their first use here, which is compiled before their definitions: a
+;; LET of one would otherwise bind it lexically, and a read warns (podster-8o0k).
+(defvar *openapi-v3-completing*) ; defined in crd-openapi.lisp
+
 (defun authorization-bearer-token (authorization)
   "The token from an RFC 7235 `Bearer <token>` Authorization header, or NIL when
    the header is absent or its scheme is not bearer. The auth-scheme is matched

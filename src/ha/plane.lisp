@@ -25,6 +25,10 @@
 
 (in-package #:gr8s.ha)
 
+;; Special before their first use here, which is compiled before their definitions: a
+;; LET of one would otherwise bind it lexically, and a read warns (podster-8o0k).
+(defvar gr8s.resources::*stored-resource-types*) ; defined in resources/core-resources.lisp
+
 (defun raft-consensus-resource-p (resource)
   "True when writes to RESOURCE (a stored-resource plural like \"configmaps\")
    must go through Raft: every stored resource type, Events included."
