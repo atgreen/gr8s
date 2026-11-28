@@ -1433,6 +1433,22 @@ operations. Stops the server on exit. Errors when the agent is not managed."
            (funcall function)
         (stop-agent-cni-server server)))))
 
+(defun gr8-ask-pod-p (pod)
+  "True when POD is a gr8 run whose user is asked about a host its policy refuses."
+  (equal "true" (gethash "gr8s.io/gr8-ask" (gr8s.network::np-pod-labels pod))))
+
+(defun gr8-refuse-label (host)
+  "The label gr8 puts on its run's Pod when the user says no to HOST (podster-3zu0): a
+digest, so any name makes a valid label key."
+  (format nil "gr8s.io/refuse-~(~A~)"
+          (subseq (ironclad:byte-array-to-hex-string
+                   (ironclad:digest-sequence :sha256 (babel:string-to-octets (string-downcase host) :encoding :utf-8)))
+                  0 16)))
+
+(defun gr8-refused-p (pod host)
+  "True when the user of gr8 run POD said no to HOST."
+  (equal "true" (gethash (gr8-refuse-label host) (gr8s.network::np-pod-labels pod))))
+
 (defun call-with-service-lb (node-runtime function)
   "Bring up the in-kernel ClusterIP socket load balancer for the agent's
 lifetime, then run FUNCTION.  Must run inside the managed-containerd scope so
@@ -1500,8 +1516,18 @@ the node from starting."
                    (declare (ignore specs profiles sandbox-profiles namespace-labels))
                    (let ((pod (and ip-map (gethash client ip-map))))
                      (if (and pod (gr8s.network::pod-egress-synthetic-p pod cluster-policies))
-                         (values (gr8s.network::pod-egress-allowed-domains pod cluster-policies) t)
+                         (values (gr8s.network::pod-egress-allowed-domains pod cluster-policies) t
+                                 (gr8-ask-pod-p pod))
                          :all))))
+               :ask (lambda (peer)
+                      ;; A run whose user is at its terminal asks them (podster-3zu0).
+                      (let* ((ip-map (first (node-runtime-egress-view node-runtime)))
+                             (pod (and ip-map (gethash peer ip-map))))
+                        (and pod (gr8-ask-pod-p pod))))
+               :refused (lambda (peer host)
+                          (let* ((ip-map (first (node-runtime-egress-view node-runtime)))
+                                 (pod (and ip-map (gethash peer ip-map))))
+                            (and pod (gr8-refused-p pod host))))
                :report (lambda (peer host address port allowed rule)
                          ;; A refusal is otherwise silent: the client just sees a reset.
                          (unless allowed

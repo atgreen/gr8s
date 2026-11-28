@@ -228,6 +228,44 @@ spec:
 A sandbox needs no Deny rule: its built-in last rule denies everything no policy
 accepts.
 
+## When the policy refuses a host
+
+At a terminal, gr8 asks you as it happens:
+
+```console
+gr8: claude wants to reach pypi.org, which its policy doesn't allow. Allow it [o]nce, [a]lways, or [n]o?
+```
+
+The node answers the command's lookup of a name its policy refuses with an address
+that stands for the name, without looking the name up, so it leaves the node only if
+you allow it. It holds the command's connection to that address while gr8 asks, for up
+to a minute. The command's output waits while the question is on screen, and a
+full-screen program draws itself again after.
+
+- **o** allows the host for this run: gr8 adds it to the run's own
+  ClusterNetworkPolicy, and the held connection goes through.
+- **a** does that and adds it to the command's policy file, as below, so later runs
+  are allowed it too.
+- **n**, or no answer within 50 seconds, refuses it: gr8 labels the run's Pod
+  `gr8s.io/refuse-<digest of the host>`, and the node closes the connection.
+
+gr8 asks once per host per run. Without a terminal it doesn't ask, and policy refuses
+at once.
+
+When the command exits, gr8 lists what the policy refused that you weren't asked
+about, from the node's flow events for the run:
+
+```console
+gr8: the sandbox's policy refused:
+gr8:   files.pythonhosted.org (3 times)
+gr8: Allow them from now on, in /home/you/.config/gr8/policies/pip.yaml? [y/N]
+```
+
+Yes adds them to the policy the run used, keeping its comments, or makes
+`~/.config/gr8/policies/COMMAND.yaml` when it had none. A working-directory policy
+you change this way counts as approved as changed. Without a terminal, gr8 says where
+to add them instead.
+
 ## Seeing every request
 
 The proxy terminates a sandbox's TLS for every allowed host. It presents a

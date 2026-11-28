@@ -128,6 +128,16 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- gr8 asks, at the terminal, when a sandbox reaches a host its policy refuses: allow
+  it once, always, or no (podster-3zu0). The node answers the name with an address that
+  stands for it without looking it up, so the name leaves the node only once allowed,
+  and holds the connection while gr8 asks; the command's output waits, and a
+  full-screen program redraws after. Allowing adds the host to the run's
+  ClusterNetworkPolicy, and always to the policy file too; no labels the run's Pod so
+  the node refuses at once.
+- When a run ends, gr8 lists the hosts its policy refused and offers to add them to
+  the run's policy file, keeping its comments, or to a new one (podster-l3zx). gr8
+  users may read their own namespace's flow events for this.
 - `gr8` offers to move a login it knows into the cluster the first time a command
   that uses it runs without it (podster-pojp), so `gr8 claude` on a fresh desktop
   needs no `gr8 --login claude` first. It asks only on a terminal, defaults to

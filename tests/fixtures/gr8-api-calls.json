@@ -19,6 +19,12 @@
   },
   {
     "group": "",
+    "resource": "pods",
+    "verb": "patch",
+    "namespaced": true
+  },
+  {
+    "group": "",
     "resource": "pods/exec",
     "verb": "create",
     "namespaced": true
@@ -87,6 +93,18 @@
     "group": "agents.kruise.io",
     "resource": "securityprofiles",
     "verb": "delete",
+    "namespaced": true
+  },
+  {
+    "group": "gr8s.io",
+    "resource": "flows",
+    "verb": "list",
+    "namespaced": true
+  },
+  {
+    "group": "gr8s.io",
+    "resource": "flows",
+    "verb": "watch",
     "namespaced": true
   },
   {

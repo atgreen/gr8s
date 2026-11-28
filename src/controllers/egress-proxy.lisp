@@ -33,6 +33,9 @@
 
 (in-package #:gr8s.controllers)
 
+(defparameter +egress-ask-seconds+ 60
+  "How long a connection to a name the user is asked about waits for their answer.")
+
 (defstruct egress-proxy
   socket thread (stop nil) address port
   decide    ; (peer-address host address port) -> (values allowed-p rule-name)
@@ -47,7 +50,11 @@
   request-report  ; (peer-address host address port method path code rule-name &optional audit), or NIL
   (upstream-verify pure-tls:+verify-required+) ; how an injected connection checks its upstream
   names     ; the egress-name-table synthetic addresses are looked up in, or NIL
-  dialed)   ; (client-socket) -> (values address port) the client dialled
+  dialed    ; (client-socket) -> (values address port) the client dialled
+  ask       ; (peer-address) -> true when the Pod's user is asked about a refused name, or NIL
+  refused   ; (peer-address host) -> true once that user has said no to HOST, or NIL
+  pending   ; (peer-address host port) -> reports a connection held for the user to decide, or NIL
+  (ask-seconds +egress-ask-seconds+)) ; how long a held connection waits for that
 
 (defparameter +egress-proxy-head-limit+ 16384
   "The most of a cleartext request head the proxy reads looking for its Host.")
@@ -140,6 +147,16 @@ leaves as the client asked."
                  (egress-proxy-handle-synthetic proxy client peer dialed port)
                  (return-from egress-proxy-handle))
                (multiple-value-bind (host prefix) (egress-client-destination client)
+                 ;; A name the client looked up elsewhere, and dialled by its address, is
+                 ;; asked about too (podster-3zu0): held, before it is looked up here,
+                 ;; unless policy allows it by name or by the address dialled.
+                 (when (and host (egress-proxy-ask proxy) (funcall (egress-proxy-ask proxy) peer)
+                            (not (funcall (egress-proxy-decide proxy) peer host dialed port)))
+                   (multiple-value-bind (approved rule) (egress-await-approval proxy peer host port)
+                     (unless approved
+                       (when (egress-proxy-report proxy)
+                         (ignore-errors (funcall (egress-proxy-report proxy) peer host dialed port nil rule)))
+                       (return-from egress-proxy-handle))))
                  (let ((address (and host (funcall (egress-proxy-resolve proxy) host))))
                    (multiple-value-bind (allowed rule) (funcall (egress-proxy-decide proxy) peer host address port)
                      (setf allowed (and allowed address t))
@@ -210,10 +227,40 @@ audit): PROGRAM the one that opened it, and under Audit a refusal is AUDIT inste
                 ((eq enforcement :audit) (values t nil (first executables) reason))
                 (t (values nil reason (first executables))))))))
 
+(defun egress-await-approval (proxy peer host port &key (interval 0.5))
+  "Whether the Pod at PEER, whose user PROXY asks, may reach HOST on PORT (podster-3zu0):
+at once when a rule allows it by name; otherwise report the connection held, and wait,
+deciding it again by name, until a rule allows it, the user says no (PROXY's refused),
+or they have had PROXY's ask-seconds. Returns (values allowed-p rule). Decided without
+an address, a sandbox's deny-all rule, which matches addresses, doesn't apply, so only
+an Accept rule naming HOST counts, never the default."
+  (multiple-value-bind (allowed rule) (funcall (egress-proxy-decide proxy) peer host nil port)
+    (when (and allowed rule) (return-from egress-await-approval (values t rule)))
+    (when (egress-proxy-pending proxy)
+      (ignore-errors (funcall (egress-proxy-pending proxy) peer host port)))
+    (loop with deadline = (+ (get-internal-real-time)
+                             (* (egress-proxy-ask-seconds proxy) internal-time-units-per-second))
+          until (or (egress-proxy-stop proxy) (> (get-internal-real-time) deadline)
+                    (and (egress-proxy-refused proxy) (funcall (egress-proxy-refused proxy) peer host)))
+          do (sleep interval)
+             (multiple-value-setq (allowed rule) (funcall (egress-proxy-decide proxy) peer host nil port))
+             (when (and allowed rule) (return-from egress-await-approval (values t rule))))
+    (values nil rule)))
+
 (defun egress-proxy-handle-synthetic (proxy client peer dialed port)
   "Serve CLIENT, which dialled the synthetic address DIALED on PORT: decide it by the name
 DIALED stands for, and dial one of that name's pinned addresses, never resolving the name
-again. A client that speaks first and names another host in its TLS SNI is refused."
+again. A client that speaks first and names another host in its TLS SNI is refused. For
+a Pod whose user is asked, a name policy refuses is held until they decide (podster-3zu0)
+and only then looked up."
+  (let ((asked (and (egress-proxy-ask proxy) (egress-proxy-names proxy)
+                    (gr8s.network::egress-name-at (egress-proxy-names proxy) dialed))))
+    (when (and asked (funcall (egress-proxy-ask proxy) peer))
+      (multiple-value-bind (allowed rule) (egress-await-approval proxy peer asked port)
+        (unless allowed
+          (when (egress-proxy-report proxy)
+            (ignore-errors (funcall (egress-proxy-report proxy) peer asked nil port nil rule)))
+          (return-from egress-proxy-handle-synthetic nil)))))
   (multiple-value-bind (host addresses)
       (gr8s.network::egress-name-for-connect (egress-proxy-names proxy) dialed)
     (multiple-value-bind (address rule allowed) (and host (egress-synthetic-verdict proxy peer host addresses port))
@@ -280,9 +327,9 @@ again. A client that speaks first and names another host in its TLS SNI is refus
 (defun start-egress-proxy (&key (address "127.0.0.1") (port 0) decide
                                 (resolve #'egress-default-resolve) (connect #'egress-default-connect) report
                                 inject inspect bindings binaries mint request-report (upstream-verify pure-tls:+verify-required+)
-                                names dialed)
+                                names dialed ask refused pending (ask-seconds +egress-ask-seconds+))
   "Listen on ADDRESS:PORT and serve captured connections, one thread each. DECIDE, RESOLVE,
-CONNECT, REPORT, INSPECT, NAMES and DIALED are as EGRESS-PROXY documents. Returns the EGRESS-PROXY;
+CONNECT, REPORT, INSPECT, NAMES, DIALED, ASK, REFUSED and PENDING are as EGRESS-PROXY documents. Returns the EGRESS-PROXY;
 its PORT is the bound port (the kernel's choice when PORT is 0)."
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
@@ -294,7 +341,8 @@ its PORT is the bound port (the kernel's choice when PORT is 0)."
                                     :inject inject :inspect inspect :bindings bindings :binaries binaries :mint mint
                                     :request-report request-report
                                     :upstream-verify upstream-verify
-                                    :names names :dialed (or dialed #'egress-default-dialed))))
+                                    :names names :dialed (or dialed #'egress-default-dialed)
+                                    :ask ask :refused refused :pending pending :ask-seconds ask-seconds)))
       (setf (egress-proxy-thread proxy)
             (bt:make-thread
              (lambda ()
@@ -398,6 +446,13 @@ the rule it broke."
     (when audit (setf (gethash "audit" (gethash "l7" flow)) audit))
     flow))
 
+(defun egress-pending-flow-object (peer host port)
+  "The flow event for the Pod at PEER's connection to HOST on PORT, which policy refuses
+and the proxy holds while its user decides (podster-3zu0)."
+  (core-object "verdict" "PENDING" "reason" "POLICY" "direction" "egress" "protocol" "TCP"
+               "podAddress" peer "peerAddress" "" "peerPort" port "peerName" host
+               "l7" (core-object "type" "egress" "host" host)))
+
 (defun egress-request-flow-object (peer host address port method path code rule &optional audit)
   "The flow event for one request the proxy relayed from the Pod at PEER to HOST, naming
 the SecurityProfile rule that injected a credential into it -- never the credential --
@@ -427,7 +482,7 @@ and REPORT, when given, sees it too."
                                           program audit))))))
 
 (defun start-node-egress-proxy (decide patterns-for &key (address gr8s.network::+egress-proxy-address+) (port 15443)
-                                                       inject inspect bindings binaries mint report
+                                                       inject inspect bindings binaries mint report ask refused
                                                        (upstreams (list (cons gr8s.network::+node-gateway-address+ 53))))
   "Start the node egress proxy on ADDRESS (put on the node gateway interface), steer every
 port there and on the synthetic range to it, and serve the egress DNS gate on its port 53.
@@ -446,6 +501,10 @@ node DNS server, UPSTREAMS. Returns (values proxy steering gate)."
                 :address address :port port :decide decide :inject inject :inspect inspect :bindings bindings
                 :binaries binaries
                 :mint mint :names names
+                :ask ask :refused refused
+                :pending (lambda (peer host port)
+                           (let ((sink *gateway-flow-sink*))
+                             (when sink (funcall sink (egress-pending-flow-object peer host port)))))
                 :request-report (lambda (peer host resolved port method path code rule &optional audit)
                                   (let ((sink *gateway-flow-sink*))
                                     (when sink
@@ -497,14 +556,29 @@ node DNS server, UPSTREAMS. Returns (values proxy steering gate)."
       (let ((name (string-downcase (string-right-trim "." name))))
         (some (lambda (pattern) (gr8s.network::egress-domain-matches-p pattern name)) patterns))))
 
-(defun egress-dns-gate-answer (packet patterns forward &key synthesize)
+(defun egress-dns-gate-answer (packet patterns forward &key synthesize reserve)
   "Answer DNS PACKET for a client allowed PATTERNS: relay it with FORWARD (packet ->
 response) when every question is allowed, else REFUSED. With SYNTHESIZE, a function from
 a name to (values address ttl) or (values NIL rcode), names outside the cluster zone are
-answered with synthetic addresses rather than relayed."
+answered with synthetic addresses rather than relayed. With RESERVE, the same for a name
+PATTERNS don't allow but whose connection the proxy holds for the user to decide
+(podster-3zu0): the address stands for the name, which isn't looked up."
   (let* ((query (ignore-errors (0conf:decode-message packet)))
          (questions (and query (0conf:dns-message-questions query))))
     (cond ((null query) nil)
+          ((and reserve questions (null (rest questions))
+                (not (egress-dns-name-allowed-p (0conf:question-name (first questions)) patterns)))
+           (let ((question (first questions)))
+             (if (/= (0conf:question-qtype question) 0conf:+type-a+)
+                 (cl-dns-proxy::dns-authoritative-response query)
+                 (multiple-value-bind (address ttl) (funcall reserve (0conf:question-name question))
+                   (if address
+                       (cl-dns-proxy::dns-authoritative-response
+                        query :answers (list (make-instance '0conf:a-record
+                                                            :name (0conf:question-name question)
+                                                            :address (gr8s.network::ipv4-network-octets address)
+                                                            :ttl ttl)))
+                       (cl-dns-proxy::dns-authoritative-response query :rcode 5))))))
           ((not (and questions (every (lambda (question)
                                         (egress-dns-name-allowed-p (0conf:question-name question) patterns))
                                       questions)))
@@ -585,8 +659,9 @@ client, name and verdict within WINDOW seconds of the last report is folded into
                                    (upstreams (list (cons gr8s.network::+node-gateway-address+ 53)))
                                    (timeout 2.0))
   "Serve DNS on ADDRESS:PORT over UDP and TCP. PATTERNS-FOR maps a client address to
-(values patterns synthetic-p): the domain patterns it may resolve, or :all, and whether
-it is answered with synthetic addresses from the egress-name-table NAMES. REPORT, when
+(values patterns synthetic-p ask-p): the domain patterns it may resolve, or :all, whether
+it is answered with synthetic addresses from the egress-name-table NAMES, and whether a
+name it may not resolve is answered with a reserved one, for its user to decide. REPORT, when
 given, is called with (client name allowed-p) for each question outside the cluster zone
 of a client whose names policy decides, once per decision (MAKE-EGRESS-DNS-REPORTER).
 Returns the EGRESS-DNS-GATE."
@@ -597,14 +672,19 @@ Returns the EGRESS-DNS-GATE."
     (flet ((address-string (octets) (format nil "~{~D~^.~}" (coerce octets 'list)))
            (forward (packet) (cl-dns-proxy:forward-dns-udp packet upstreams timeout)))
       (labels ((answer (packet client forward)
-                 (multiple-value-bind (patterns synthetic) (funcall patterns-for client)
+                 (multiple-value-bind (patterns synthetic ask) (funcall patterns-for client)
                    (when (and report (not (eq patterns :all)))
                      (loop for (name . allowed) in (egress-dns-decisions packet patterns)
-                           do (ignore-errors (funcall report client name allowed))))
+                           ;; An asked client's refused name isn't refused yet: its
+                           ;; connection is held for its user to decide (podster-3zu0).
+                           unless (and ask (not allowed) names)
+                             do (ignore-errors (funcall report client name allowed))))
                    (egress-dns-gate-answer
                     packet patterns forward
                     :synthesize (and synthetic names
-                                     (lambda (name) (gr8s.network::egress-name-answer names name)))))))
+                                     (lambda (name) (gr8s.network::egress-name-answer names name)))
+                    :reserve (and ask names
+                                  (lambda (name) (gr8s.network::egress-name-reserve names name)))))))
       (setf (sb-bsd-sockets:sockopt-reuse-address udp) t
             (sb-bsd-sockets:sockopt-reuse-address tcp) t)
       (sb-bsd-sockets:socket-bind udp (sb-bsd-sockets:make-inet-address address) port)

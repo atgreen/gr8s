@@ -765,3 +765,82 @@ request bodies it got. Returns (values stop port bodies)."
                                                        `(("Authorization" . ,(format nil "Bearer ~A" +test-stand-in-a+))))))
                (ignore-errors (sb-bsd-sockets:socket-close socket)))))
       (funcall stop))))
+
+;;; Asking the user (podster-3zu0): a name an asked run's policy refuses is answered
+;;; with a reserved address, never looked up, and its connection is held while the user
+;;; decides.
+
+(test an-asked-runs-refused-name-gets-an-address-and-is-not-looked-up
+  (let* ((resolved '())
+         (table (gr8s.network::make-egress-name-table
+                 :resolve (lambda (name) (push name resolved) (values '("160.79.104.10") 300 0))))
+         (patterns '("api.anthropic.com")))
+    (flet ((answer (name &optional (qtype 1))
+             (gr8s.controllers::egress-dns-gate-answer
+              (egress-dns-query name qtype) patterns (lambda (packet) packet)
+              :synthesize (lambda (name) (gr8s.network::egress-name-answer table name))
+              :reserve (lambda (name) (gr8s.network::egress-name-reserve table name)))))
+      (let* ((packet (answer "pypi.org"))
+             (records (0conf:dns-message-answers (0conf:decode-message packet)))
+             (address (and records (format nil "~{~D~^.~}" (coerce (0conf:a-address (first records)) 'list)))))
+        (is (= 0 (cl-dns-proxy:dns-response-code packet)))
+        (is-true (and address (gr8s.network::egress-synthetic-address-p address)))
+        (is (= gr8s.network::+egress-ask-ttl+ (0conf:rr-ttl (first records))))
+        ;; The address stands for the name, which no one has looked up yet.
+        (is (equal "pypi.org" (gr8s.network::egress-name-at table address)))
+        (is (null resolved)))
+      ;; Its other record types get no data, as an allowed name's do.
+      (is (null (0conf:dns-message-answers (0conf:decode-message (answer "pypi.org" 28)))))
+      ;; An allowed name is answered and looked up as before.
+      (is (= 0 (cl-dns-proxy:dns-response-code (answer "api.anthropic.com"))))
+      (is (equal '("api.anthropic.com") resolved)))))
+
+(defun egress-asking-proxy (decide &key (seconds 2) refused)
+  "A proxy whose DECIDE is given, asking its user for up to SECONDS, recording pending reports."
+  (let ((pending '()))
+    (values (gr8s.controllers::make-egress-proxy
+             :decide decide :ask-seconds seconds :refused refused
+             :pending (lambda (peer host port) (push (list peer host port) pending)))
+            (lambda () pending))))
+
+(test a-held-connection-waits-for-the-users-answer
+  ;; Allowed as soon as a rule of the run's policy names the host. Until then the
+  ;; decision by name falls through to the default, allowed with no rule, which counts
+  ;; for nothing: a sandbox's deny-all rule matches addresses, not names.
+  (let ((calls 0))
+    (multiple-value-bind (proxy pending)
+        (egress-asking-proxy (lambda (peer host address port)
+                               (declare (ignore peer address port))
+                               (if (and (equal host "pypi.org") (> (incf calls) 3))
+                                   (values t "gr8-allow")
+                                   (values t nil))))
+      (is-true (gr8s.controllers::egress-await-approval proxy "10.80.0.5" "pypi.org" 443 :interval 0.05))
+      (is (equal '(("10.80.0.5" "pypi.org" 443)) (funcall pending)))))
+  ;; A host a rule allows already isn't held, nor reported.
+  (multiple-value-bind (proxy pending) (egress-asking-proxy (lambda (&rest arguments) (declare (ignore arguments))
+                                                              (values t "gr8-allow")))
+    (is-true (gr8s.controllers::egress-await-approval proxy "10.80.0.5" "api.anthropic.com" 443 :interval 0.05))
+    (is (null (funcall pending))))
+  ;; The user's no, a label on the run's Pod, refuses it at once.
+  (let ((calls 0) (start (get-internal-real-time)))
+    (multiple-value-bind (proxy pending)
+        (egress-asking-proxy (lambda (&rest arguments) (declare (ignore arguments)) (values nil "gr8-sandbox"))
+                             :seconds 30
+                             :refused (lambda (peer host) (declare (ignore peer))
+                                        (and (equal host "pypi.org") (> (incf calls) 2))))
+      (is-false (gr8s.controllers::egress-await-approval proxy "10.80.0.5" "pypi.org" 443 :interval 0.05))
+      (is (< (- (get-internal-real-time) start) (* 5 internal-time-units-per-second)))
+      (is (= 1 (length (funcall pending))))))
+  ;; No answer: refused when the user has had their time.
+  (multiple-value-bind (proxy) (egress-asking-proxy (lambda (&rest arguments) (declare (ignore arguments)) nil)
+                                                    :seconds 1)
+    (is-false (gr8s.controllers::egress-await-approval proxy "10.80.0.5" "pypi.org" 443 :interval 0.05))))
+
+(test the-users-no-is-a-label-any-host-name-fits-in
+  (let ((label (gr8s.agent::gr8-refuse-label "PyPI.org")))
+    (is (equal label (gr8s.agent::gr8-refuse-label "pypi.org")))
+    (is (equal "gr8s.io/refuse-" (subseq label 0 15)))
+    (is (= 16 (- (length label) 15)))
+    (is (string/= label (gr8s.agent::gr8-refuse-label "files.pythonhosted.org")))
+    ;; gr8 computes the same label (gr8/internal/client RefuseLabel).
+    (is (equal "gr8s.io/refuse-a379a6f6eeafb9a5" (gr8s.agent::gr8-refuse-label "example.com")))))

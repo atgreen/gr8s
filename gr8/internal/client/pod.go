@@ -59,6 +59,7 @@ type PodRequest struct {
 	Command   string // the command's base name
 	Identity  Identity
 	GPU       bool // ask for the node's GPU render nodes (GPUResource)
+	Ask       bool // the user is at the terminal, to be asked about a refused host
 	// Resources are the command's CPU and memory requests and limits.
 	Resources corev1.ResourceRequirements
 }
@@ -79,16 +80,20 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 		}
 	}
 	name := PodName(request.Command, suffix)
+	labels := map[string]string{
+		LabelManagedBy: "gr8",
+		LabelCommand:   LabelValue(request.Command),
+		LabelUser:      LabelValue(request.Identity.User),
+		LabelRun:       name,
+	}
+	if request.Ask {
+		labels[LabelAsk] = "true"
+	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: request.Namespace,
-			Labels: map[string]string{
-				LabelManagedBy: "gr8",
-				LabelCommand:   LabelValue(request.Command),
-				LabelUser:      LabelValue(request.Identity.User),
-				LabelRun:       name,
-			},
+			Labels:    labels,
 		},
 		Spec: corev1.PodSpec{
 			NodeName:                      request.Node,
