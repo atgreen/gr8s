@@ -111,6 +111,15 @@ def main():
         opened = 0
         rows = []
         last = server_sample(args.ssh)
+        # The server's own load before any tab: 30 s with nothing joining.
+        time.sleep(30)
+        sample = server_sample(args.ssh)
+        idle = {"t": 0, "tabs": 0, "nodes": nodes_ready(args.kubeconfig), "running": 0,
+                "rss_mib": round(sample[0]), "available_mib": round(sample[1]),
+                "busy": round((sample[2] - last[2]) / max(1, sample[3] - last[3]), 3)}
+        print(json.dumps(idle), flush=True)
+        last = sample
+        start = time.time()
         next_wave = start
         end = start + (args.waves - 1) * args.interval + args.settle
         while time.time() < end:
@@ -121,12 +130,18 @@ def main():
                     opened += 1
                 next_wave += args.interval
             time.sleep(5)
-            sample = server_sample(args.ssh)
+            try:
+                sample = server_sample(args.ssh)
+                nodes = nodes_ready(args.kubeconfig)
+                running = 0 if args.no_pods else sum(1 for p in probe_pods(args.kubeconfig)
+                                                     if p["status"].get("phase") == "Running")
+            except (subprocess.CalledProcessError, ValueError, IndexError) as error:
+                # A checkpoint can turn a read away for a moment: skip this sample.
+                print(f"sample skipped: {error}", file=sys.stderr, flush=True)
+                continue
             busy = (sample[2] - last[2]) / max(1, sample[3] - last[3])
             last = sample
-            row = {"t": round(time.time() - start), "tabs": opened, "nodes": nodes_ready(args.kubeconfig),
-                   "running": 0 if args.no_pods else sum(1 for p in probe_pods(args.kubeconfig)
-                                                         if p["status"].get("phase") == "Running"),
+            row = {"t": round(time.time() - start), "tabs": opened, "nodes": nodes, "running": running,
                    "rss_mib": round(sample[0]), "available_mib": round(sample[1]), "busy": round(busy, 3)}
             rows.append(row)
             print(json.dumps(row), flush=True)
@@ -147,11 +162,20 @@ def main():
                 writer = csv.DictWriter(f, fieldnames=["pod", "created", "seconds"])
                 writer.writeheader()
                 writer.writerows(starts)
-        base = rows[0]
+        base = idle
         peak = max(rows, key=lambda r: r["nodes"])
+        # Steady state: the samples after the last wave's nodes settled, at the peak count.
+        steady = [r for r in rows if r["nodes"] == peak["nodes"] and r["t"] >= (args.waves - 1) * args.interval + 30]
         summary = {"tabs": opened, "peak_nodes": peak["nodes"],
-                   "rss_mib_at_peak": peak["rss_mib"], "rss_mib_at_start": base["rss_mib"],
-                   "mib_per_node": round((peak["rss_mib"] - base["rss_mib"]) / max(1, peak["nodes"] - base["nodes"]), 1),
+                   "busy_idle": base["busy"],
+                   "busy_steady": round(sum(r["busy"] for r in steady) / len(steady), 3) if steady else None,
+                   "rss_mib_idle": base["rss_mib"],
+                   "rss_mib_steady": round(sum(r["rss_mib"] for r in steady) / len(steady)) if steady else None,
+                   "mib_per_node": (round((sum(r["rss_mib"] for r in steady) / len(steady) - base["rss_mib"])
+                                          / max(1, peak["nodes"] - base["nodes"]), 1) if steady else None),
+                   "available_mib_drop_per_node": (round((base["available_mib"] - sum(r["available_mib"] for r in steady)
+                                                          / len(steady)) / max(1, peak["nodes"] - base["nodes"]), 1)
+                                                   if steady else None),
                    "available_mib_min": min(r["available_mib"] for r in rows),
                    "busy_max": max(r["busy"] for r in rows)}
         if starts:
