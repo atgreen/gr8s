@@ -714,3 +714,10 @@
            ;; Not root, as in tests and rootless runs: left as it is.
            (is (eq :disk (gr8s.kubelet::mount-managed-containerd-state manager :euid 1000))))
       (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(test a-mount-beside-containerds-state-isnt-one-under-it
+  (let ((mounts (format nil "1 2 0:1 / /var/lib/gr8s/agent/containerd/runtime/bin rw - tmpfs gr8s-runtime rw~%")))
+    (is-false (gr8s.kubelet::mounts-under-p #p"/var/lib/gr8s/agent/containerd/run/" :mount-info mounts))
+    (is-true (gr8s.kubelet::mounts-under-p
+              #p"/var/lib/gr8s/agent/containerd/run/"
+              :mount-info (format nil "1 2 0:1 / /var/lib/gr8s/agent/containerd/run/netns/cni-1 rw - nsfs nsfs rw~%")))))

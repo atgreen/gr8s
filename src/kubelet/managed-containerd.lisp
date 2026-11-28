@@ -380,9 +380,11 @@ state is in use."
 (defun mounts-under-p (directory &key (mount-info (uiop:read-file-string #P"/proc/thread-self/mountinfo")))
   "True when anything is mounted at or below DIRECTORY."
   (let ((prefix (string-right-trim "/" (namestring directory))))
+    ;; Under it, not beside it: containerd/runtime/bin is no mount under containerd/run.
     (some (lambda (line)
             (let ((point (nth 4 (uiop:split-string line :separator " "))))
-              (and point (eql 0 (search prefix point)))))
+              (and point (or (string= point prefix)
+                             (eql 0 (search (concatenate 'string prefix "/") point))))))
           (uiop:split-string mount-info :separator '(#\Newline)))))
 
 (defun mount-managed-containerd-state
