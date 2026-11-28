@@ -290,6 +290,46 @@
   (hunchentoot:set-cookie "state" :value "s1" :path "/")
   "cookies")
 
+(test gateway-never-ends-a-failed-body-as-if-it-were-whole
+  ;; podster-ox5r: a backend that dies partway through a chunked body. The Gateway re-sends
+  ;; it chunked, and closing its stream used to write the terminating chunk, so a client
+  ;; saw a complete, short body and kept it. The reply must end without one.
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+         (backend-port (usocket:get-local-port listener))
+         (backend (bt:make-thread
+                   (lambda ()
+                     (ignore-errors
+                      (let* ((raw (usocket:socket-accept listener))
+                             (stream (usocket:socket-stream raw)))
+                        (gw-read-head stream)
+                        (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                                         (format nil "HTTP/1.1 200 OK~C~CTransfer-Encoding: chunked~C~CConnection: close~C~C~C~C5~C~Chello~C~C"
+                                                 #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                                                 #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
+                                        stream)
+                        (finish-output stream)
+                        (usocket:socket-close raw))))
+                   :name "gw dying backend"))
+         (routes (list (gr8s.controllers::make-gw-route
+                        :namespace "default" :hostnames '("app.example.com")
+                        :rules (list (gr8s.controllers::make-gw-rule
+                                      :matches (list (gr8s.controllers::make-gw-match :path-type :prefix :path "/"))
+                                      :backends (list (gr8s.controllers::make-gw-backend :name "dying" :port backend-port)))))))
+         (router (gr8s.controllers::build-gateway-router routes))
+         (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port)))
+         (gateway (gr8s.controllers::start-gateway-listener :port 0 :router router :resolver resolver :name "test"))
+         (listener-port (hunchentoot:acceptor-port gateway)))
+    (unwind-protect
+         (multiple-value-bind (code headers body) (gw-raw-request listener-port "app.example.com" "/big")
+           (is (= 200 code))
+           (is (equalp "chunked" (gw-header headers "transfer-encoding")))
+           ;; No terminating chunk ("0" CRLF CRLF): the client knows the body was cut short.
+           (is (not (uiop:string-suffix-p body (format nil "0~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed)))
+               "the cut-short body ends with a terminating chunk: ~S" body))
+      (gr8s.controllers::stop-gateway-listener gateway)
+      (ignore-errors (bt:join-thread backend))
+      (ignore-errors (usocket:socket-close listener)))))
+
 (test gateway-forwards-each-set-cookie-on-its-own-line
   "podster-qnr: a browser takes one cookie per Set-Cookie line, so the Gateway must not
 pass on the comma-joined line its HTTP client makes of several, Expires dates and all."

@@ -103,6 +103,17 @@ comma begins another cookie only where NAME= follows; Expires dates hold commas 
           (format nil "~A~A~@[?~A~]~@[#~A~]" prefix path (puri:uri-query uri) (puri:uri-fragment uri))
           location))))
 
+(defun abandon-sent-reply ()
+  "End the current reply, whose head is already sent, so its client can tell the body is
+incomplete. A chunked body must not get its terminating chunk, which chunga writes when
+the stream is closed: what was sent would look whole, and a browser keeps it, cached or
+compiled, as the real thing (podster-ox5r). The connection is closed after."
+  (let ((stream hunchentoot::*hunchentoot-stream*))
+    (when (typep stream 'chunga:chunked-output-stream)
+      ;; The slot, not the accessor: switching chunking off through it writes the last chunk.
+      (setf (slot-value stream 'chunga::output-chunking-p) nil)))
+  (setf hunchentoot::*close-hunchentoot-stream* t))
+
 (defun pod-proxy-copy-body (upstream client headers)
   "Forward real framed bytes, detecting truncated Content-Length responses."
   (let* ((length-text (unless (assoc :transfer-encoding headers) (cdr (assoc :content-length headers))))
@@ -261,7 +272,7 @@ the API prefix of its URL."
       (error (condition)
         (when dialled (ignore-errors (close dialled)))
         (if hunchentoot::*headers-sent*
-            (error condition)
+            (progn (abandon-sent-reply) (error condition))
             (core-resource-error 503 "ServiceUnavailable" "Proxied HTTP connection failed: ~A" condition))))))
 
 (defun proxy-upgrade-request-headers (host raw-path)
@@ -353,7 +364,7 @@ stream in both directions."
       (error (condition)
         (when socket (ignore-errors (gr8s.http-client:close-transport socket)))
         (if hunchentoot::*headers-sent*
-            (error condition)
+            (progn (abandon-sent-reply) (error condition))
             (core-resource-error 503 "ServiceUnavailable"
                                  "Proxied connection upgrade failed: ~A" condition))))))
 

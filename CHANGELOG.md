@@ -33,6 +33,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- A Gateway or Pod-proxy reply whose body fails partway, after its head is sent, no
+  longer ends as if it were whole (podster-ox5r). The proxy re-sends a chunked body
+  chunked, and closing the stream wrote the terminating chunk, so a browser got a
+  short file with no error and kept it: an 11 MB WebAssembly module arrived as 9.7 MB.
+  The connection now closes without that chunk.
 - A browser tab that rejoins after a server restart keeps its running Pods'
   addresses (podster-r34s). The server's address table was in memory only, so it
   handed them out afresh: the tab's Pods reported no podIP, Services lost them, and
