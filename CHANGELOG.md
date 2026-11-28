@@ -23,6 +23,9 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- `/metrics` no longer fails once a node that reported its dataplane is deleted
+  (podster-iha8). Every scrape answered 404 "Node … was not found" after a browser
+  node's tab closed. A deleted node's last report is now let go.
 - The lab scale run is measured again with podster-7op6 and podster-mtqe fixed
   (podster-i7yl). A browser node costs its server about 0.007 of a core and 6 to
   8 MiB, not the 2% of the machine the first run showed: that was the reconnect

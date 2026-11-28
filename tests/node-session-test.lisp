@@ -2788,6 +2788,28 @@ Returns the server's next message."
              (is-false (ag-grpc::server-try-reserve-ip-slot grpc "#(10 77 77 22)")))
         (gr8s.apiserver::stop-node-grpc-server server)))))
 
+(test metrics-forget-a-deleted-nodes-last-report
+  ;; podster-iha8: a Node deleted after reporting its dataplane, a browser node whose tab
+  ;; closed, must not fail the whole /metrics scrape, and its report is let go.
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((server (gr8s.apiserver::start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (runtime (gr8s.controllers::make-control-plane-runtime store server))
+           (statuses (gr8s.apiserver::node-grpc-server-statuses server)))
+      (unwind-protect
+           (progn
+             (gr8s.controllers::register-node
+              store (gr8s.model::make-node-record :id "worker-a" :name "worker-a" :pod-cidr "10.88.1.0/24"))
+             (setf (gethash "worker-a" statuses)
+                   (make-instance 'gr8s.node.v1::node-status :observed-at-unix-nanos 2000000000000000000)
+                   (gethash "browser-gone" statuses)
+                   (make-instance 'gr8s.node.v1::node-status :observed-at-unix-nanos 2000000000000000000))
+             (let ((text (gr8s.runtime:runtime-network-metrics runtime)))
+               (is (search "gr8s_dataplane_node_ready{node=\"worker-a\"}" text))
+               (is (null (search "browser-gone" text))))
+             (is (equal '("worker-a") (loop for name being the hash-keys of statuses collect name))))
+        (gr8s.apiserver::stop-node-grpc-server server)))))
+
 (test control-plane-logs-come-from-the-assigned-remote-agent
   (with-temporary-store (store path)
     (gr8s.controllers::register-node

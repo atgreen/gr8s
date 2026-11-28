@@ -13,7 +13,8 @@
   (dolist (spec '(("GR8S.APISERVER" "NODE-GRPC-SERVER-LOCK" "NODE-GRPC-SERVER-STATUSES"
                    "NODE-GRPC-SERVER-STORE")
                   ("GR8S.CONTROLLERS" "CONTROL-PLANE-RUNTIME" "CONTROL-PLANE-RUNTIME-NODE-SERVER"
-                   "GET-NODE")
+                   "GET-NODE-UNLOCKED")
+                  ("GR8S.STORE" "WITH-STORE-LOCK")
                   ("GR8S.MODEL" "NODE-RECORD-RUNTIME-READY-P")
                   ("GR8S.RUNTIME" "RUNTIME-NETWORK-METRICS")))
     (let ((pkg (find-package (first spec))))
