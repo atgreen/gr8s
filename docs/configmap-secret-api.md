@@ -102,12 +102,15 @@ HA, is left as it is; move one with `secrets-encrypt` (below).
 
 ### Secrets in containers' environments
 
-Containerd keeps each container's OCI spec, its environment included, in its state
-directory. gr8s mounts a tmpfs there (`containerd/run`), as stock containerd keeps it
-under `/run`, so a Secret given as an env var isn't written to the node's disk. On a
-node upgraded with Pods running, the state stays on disk, with a log line saying so,
-until its Pods are gone or it restarts. A Secret mounted as a file is in memory too,
-on a tmpfs volume, and is the better choice for anything long-lived.
+A Secret given to a container as an env var is part of its OCI spec, which containerd
+keeps in two places on the node. Its state directory (`containerd/run`), each
+container's bundle, is now a tmpfs, as stock containerd keeps it under `/run`; on a
+node upgraded with Pods running it stays on disk, with a log line saying so, until its
+Pods are gone or it restarts. Its metadata database (`containerd/root/.../meta.db`)
+also records the spec, as upstream containerd's does, and must persist across
+restarts, so an env var's value is on the node's disk there for as long as the
+container exists. Mount Secrets as files instead: a Secret volume is a tmpfs, and its
+value is never written to the node's disk.
 
 ### Encryption-at-rest operations
 

@@ -9,10 +9,13 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Security
 
-- Containerd's state directory, which holds each container's OCI spec and so any
+- Containerd's state directory, which holds each container's OCI bundle and so any
   Secret given as an env var, is now a tmpfs (podster-j9gd), as stock containerd's
   `/run/containerd` is, rather than on the node's disk. A node upgraded with Pods
   running moves it when they're gone or it restarts, and logs that until then.
+  Containerd's metadata database still records each container's spec on disk, as
+  upstream's does; the docs now say to mount Secrets as files, which never reach
+  the node's disk.
 - gr8 users on one machine are kept apart (podster-tcr8). A Pod in a namespace gr8
   --setup made must run as its owner's UID and groups, may not escalate privilege,
   drops all capabilities, and uses no host namespaces, host ports or other sysctls;
