@@ -35,8 +35,6 @@ func main() {
 			os.Exit(sandbox.Enter(client.HostRoot, os.Args[3:]))
 		case "confine":
 			os.Exit(sandbox.Confine(os.Args[3:]))
-		case "setup":
-			os.Exit(client.SetupAsRoot())
 		}
 		fmt.Fprintf(os.Stderr, "gr8: no internal mode %q\n", os.Args[2])
 		os.Exit(sandbox.ExitCannotRun)
@@ -59,7 +57,7 @@ func run() int {
 		flags.PrintDefaults()
 	}
 	flags.StringVar(&options.Kubeconfig, "kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, then ~/.config/gr8/kubeconfig, then ~/.kube/config)")
-	flags.BoolVar(&setup, "setup", false, "make this machine a gr8s node for you (uses sudo), then run COMMAND if given")
+	flags.BoolVar(&setup, "setup", false, "get your gr8 credential from this machine's gr8s node, starting it with sudo if it isn't running, then run COMMAND if given")
 	flags.StringVar(&options.Node, "node", "", "node to run on (default: the node with this host's address)")
 	flags.StringVar(&options.Namespace, "namespace", "", "namespace for the Pod (default: the kubeconfig's when it is gr8 or gr8-*, else gr8)")
 	flags.StringVar(&options.Image, "image", "registry.k8s.io/pause:3.10", "container image (its files are not used)")
@@ -81,9 +79,14 @@ func run() int {
 	_ = flags.Parse(os.Args[1:])
 	// With no kubeconfig at all, offer to set this machine up rather than fail.
 	home, _ := os.UserHomeDir()
-	if !setup && client.NeedsSetup(options.Kubeconfig, os.Getenv, home) &&
-		term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd())) {
-		setup = client.TerminalAsk(os.Stdin, os.Stderr)("No cluster is set up for gr8. Make this machine a gr8s node? (uses sudo)")
+	// When gr8s-server already runs, setup takes nothing but asking it, so gr8 just
+	// does it; otherwise it starts the server with sudo, so gr8 asks first.
+	if !setup && client.NeedsSetup(options.Kubeconfig, os.Getenv, home) {
+		if client.ServerRunning(client.UserSocket(os.Getenv)) {
+			setup = true
+		} else if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd())) {
+			setup = client.TerminalAsk(os.Stdin, os.Stderr)("No cluster is set up for gr8. Make this machine a gr8s node? (uses sudo)")
+		}
 	}
 	if setup {
 		if err := client.Setup(home); err != nil {

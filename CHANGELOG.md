@@ -128,6 +128,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- A local user gets gr8 without sudo (podster-7uof). `gr8s-server` listens on
+  `/run/gr8s/gr8.sock`, knows who connects from the kernel (`SO_PEERCRED`), and
+  answers with their own kubeconfig, after making their namespace and grant. gr8
+  asks it on first run; sudo is needed only to start `gr8s-server` on a machine
+  where it isn't running. Root and system accounts are refused; `--gr8-users
+  GROUP` limits it to a group, and `--gr8-socket ""` turns it off.
 - `gr8 --setup` makes a fresh machine a gr8s node for the desktop user, and gr8
   offers it on a terminal when it finds no kubeconfig (podster-q35k). One sudo
   starts `gr8s-server`, waits for the node, makes the user a namespace of their

@@ -1,0 +1,152 @@
+[
+  {
+    "group": "",
+    "resource": "pods",
+    "verb": "create",
+    "namespaced": true
+  },
+  {
+    "group": "",
+    "resource": "pods",
+    "verb": "get",
+    "namespaced": true
+  },
+  {
+    "group": "",
+    "resource": "pods",
+    "verb": "delete",
+    "namespaced": true
+  },
+  {
+    "group": "",
+    "resource": "pods/exec",
+    "verb": "create",
+    "namespaced": true
+  },
+  {
+    "group": "",
+    "resource": "pods/exec",
+    "verb": "get",
+    "namespaced": true
+  },
+  {
+    "group": "",
+    "resource": "secrets",
+    "verb": "create",
+    "namespaced": true
+  },
+  {
+    "group": "",
+    "resource": "secrets",
+    "verb": "get",
+    "namespaced": true
+  },
+  {
+    "group": "",
+    "resource": "secrets",
+    "verb": "update",
+    "namespaced": true
+  },
+  {
+    "group": "",
+    "resource": "secrets",
+    "verb": "patch",
+    "namespaced": true
+  },
+  {
+    "group": "",
+    "resource": "secrets",
+    "verb": "delete",
+    "namespaced": true
+  },
+  {
+    "group": "agents.kruise.io",
+    "resource": "securityprofiles",
+    "verb": "create",
+    "namespaced": true
+  },
+  {
+    "group": "agents.kruise.io",
+    "resource": "securityprofiles",
+    "verb": "get",
+    "namespaced": true
+  },
+  {
+    "group": "agents.kruise.io",
+    "resource": "securityprofiles",
+    "verb": "update",
+    "namespaced": true
+  },
+  {
+    "group": "agents.kruise.io",
+    "resource": "securityprofiles",
+    "verb": "patch",
+    "namespaced": true
+  },
+  {
+    "group": "agents.kruise.io",
+    "resource": "securityprofiles",
+    "verb": "delete",
+    "namespaced": true
+  },
+  {
+    "group": "",
+    "resource": "nodes",
+    "verb": "get",
+    "namespaced": false
+  },
+  {
+    "group": "",
+    "resource": "nodes",
+    "verb": "list",
+    "namespaced": false
+  },
+  {
+    "group": "",
+    "resource": "namespaces",
+    "verb": "get",
+    "namespaced": false
+  },
+  {
+    "group": "gr8.gr8s.io",
+    "resource": "sandboxprofiles",
+    "verb": "create",
+    "namespaced": false
+  },
+  {
+    "group": "gr8.gr8s.io",
+    "resource": "sandboxprofiles",
+    "verb": "get",
+    "namespaced": false
+  },
+  {
+    "group": "gr8.gr8s.io",
+    "resource": "sandboxprofiles",
+    "verb": "list",
+    "namespaced": false
+  },
+  {
+    "group": "gr8.gr8s.io",
+    "resource": "sandboxprofiles",
+    "verb": "update",
+    "namespaced": false
+  },
+  {
+    "group": "gr8.gr8s.io",
+    "resource": "sandboxprofiles",
+    "verb": "delete",
+    "namespaced": false
+  },
+  {
+    "group": "policy.networking.k8s.io",
+    "resource": "clusternetworkpolicies",
+    "verb": "create",
+    "namespaced": false
+  },
+  {
+    "group": "policy.networking.k8s.io",
+    "resource": "clusternetworkpolicies",
+    "verb": "delete",
+    "namespaced": false
+  }
+]
