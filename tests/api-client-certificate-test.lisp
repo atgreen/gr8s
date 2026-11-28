@@ -511,3 +511,40 @@
           (kubernetes-error (condition) (is (= 403 (gr8s.model::kubernetes-error-status-code condition)))))
         #-(or windows darwin macos)
         (is (= 1 verifications))))))
+
+(test an-authenticated-user-gets-no-resource-it-isnt-granted
+  ;; podster-8kxy: the discovery URLs every authenticated user may read (/api/*, /apis/*) are non-resource
+  ;; URLs: they must not grant a GET of a named resource under them, a Secret above all.
+  (with-temporary-store (store directory)
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "nogrant-pki/" directory)))
+           (ca (gr8s.security::cluster-pki-ca-certificate pki))
+           (leaf (certificate-api-test-subject-leaf pki '(((2 5 4 3) . "nobody"))))
+           (now (get-universal-time))
+           (authenticate (fdefinition 'gr8s.apiserver::cached-api-certificate-identity))
+           (gr8s.apiserver::*api-connection-certificate-chain* (list leaf))
+           (gr8s.apiserver::*api-connection-certificate-cache* (gr8s.apiserver::make-api-certificate-cache))
+           (path nil))
+      (flet ((allowed-p (request-path)
+               (setf path request-path)
+               (handler-case (progn (gr8s.apiserver::authorize-in-cluster-request store :request) t)
+                 (kubernetes-error (condition)
+                   (is (= 403 (gr8s.model::kubernetes-error-status-code condition)))
+                   nil))))
+        (with-replaced-functions
+            ((gr8s.apiserver::cached-api-certificate-identity
+               (lambda (chain ca cache &optional ignored)
+                 (declare (ignore ignored)) (funcall authenticate chain ca cache now)))
+             (hunchentoot:header-in (lambda (&rest args) (declare (ignore args)) nil))
+             (hunchentoot:request-acceptor (lambda (request) (declare (ignore request)) :acceptor))
+             (gr8s.apiserver::in-cluster-client-ca (lambda (acceptor) (declare (ignore acceptor)) ca))
+             (hunchentoot:script-name (lambda (request) (declare (ignore request)) path))
+             (hunchentoot:request-method (lambda (request) (declare (ignore request)) :get))
+             (hunchentoot:parameter (lambda (&rest args) (declare (ignore args)) nil)))
+          (is-false (allowed-p "/api/v1/namespaces/kube-system/secrets/anything"))
+          (is-false (allowed-p "/api/v1/namespaces/default/pods/web"))
+          (is-false (allowed-p "/apis/apps/v1/namespaces/default/deployments/web"))
+          (is-false (allowed-p "/api/v1/nodes/worker"))
+          ;; Discovery itself stays open to every authenticated user.
+          (is-true (allowed-p "/api/v1"))
+          (is-true (allowed-p "/apis/apps/v1"))
+          (is-true (allowed-p "/version")))))))

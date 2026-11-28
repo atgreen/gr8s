@@ -9,6 +9,12 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Security
 
+- Every authenticated identity could GET any single named object without an RBAC
+  grant, Secrets included (podster-8kxy). The discovery URLs every authenticated user
+  may read (`/api/*`, `/apis/*`) were matched against resource paths too, so any
+  credential the cluster accepts, a Pod's ServiceAccount token among them, could read
+  objects by name. Lists and watches were not affected. Those URLs now grant only
+  non-resource requests, as RBAC's `nonResourceURLs` do.
 - Checked content no longer lets plain requests evict honest browser nodes
   (podster-k8oi). A tab was tainted `gr8s.io/tampered:NoExecute` for any answer but
   the expected file, so a directory without its slash (a redirect), a path with `//`,
