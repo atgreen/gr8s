@@ -237,6 +237,34 @@
     (is (equal "10.88.2.2" (gr8s.server::browser-network-address network "pod-b")))
     (is (equal "gb-wser-a" (gr8s.server::browser-tap-name "browser-a")))))
 
+(test a-rejoining-browser-node-keeps-its-pods-addresses
+  ;; podster-r34s: a restarted server hands out addresses afresh, so a tab that rejoined
+  ;; with its Pods running found them given to other Pods. Each keeps the address it had.
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (flet ((pod-on (name node address)
+             (let ((pod (create-pod store (parse-pod (cl-ppcre:regex-replace
+                                                      "\\{\"containers\""
+                                                      (cl-ppcre:regex-replace "\"name\":\"hello\"" *valid-pod-json*
+                                                                              (format nil "\"name\":\"~A\"" name))
+                                                      (format nil "{\"nodeName\":\"~A\",\"containers\"" node))))))
+               (when address
+                 (gr8s.store:with-store-lock (store)
+                   (setf (gethash (pod-uid pod) (gr8s.store:pod-store-pod-observed-statuses store))
+                         (gr8s.resources::core-object "phase" "Running" "podIP" address))))
+               (pod-uid pod))))
+      (let* ((web (pod-on "web" "browser-a" "10.80.32.4"))
+             (probe (pod-on "probe" "browser-a" "10.80.32.2"))
+             (elsewhere (pod-on "elsewhere" "browser-b" "10.80.32.3"))
+             (stray (pod-on "stray" "browser-a" "10.99.0.7"))
+             (network (gr8s.server::seed-browser-network-addresses
+                       (gr8s.server::make-browser-network "10.80.32.0/24") store "browser-a")))
+        (is (equal "10.80.32.4" (gr8s.server::browser-network-address network web)))
+        (is (equal "10.80.32.2" (gr8s.server::browser-network-address network probe)))
+        ;; Another node's Pod, and an address outside this node's CIDR, aren't kept here.
+        (is (equal "10.80.32.3" (gr8s.server::browser-network-address network stray)))
+        (is (equal "10.80.32.5" (gr8s.server::browser-network-address network elsewhere)))))))
+
 (test sparse-steering-evidence-is-next-hop-bound-fresh-deduplicated-and-clamped
   (with-temporary-store (store path)
     (declare (ignore path))

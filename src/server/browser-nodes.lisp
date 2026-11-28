@@ -1042,7 +1042,10 @@ stops with the session."
                                          (gr8s.model::node-record-all-pod-cidrs node))))
                      (when (and cidr (browser-join-pod-network acceptor))
                        (let ((network (start-browser-network-device
-                                       (make-browser-network cidr) name
+                                       ;; A tab rejoining with its Pods running keeps their addresses.
+                                       (seed-browser-network-addresses
+                                        (make-browser-network cidr) (virtual-node-host-store host) name)
+                                       name
                                        (lambda (frame) (browser-session-send-frame session frame)))))
                          (when network
                            (setf (browser-runtime-network runtime) network
