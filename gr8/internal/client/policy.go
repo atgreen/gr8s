@@ -315,6 +315,13 @@ func within(path, dir string) bool {
 	return path == dir || strings.HasPrefix(path, strings.TrimSuffix(dir, "/")+"/")
 }
 
+// approvalRecord is where gr8 keeps the content of the working-directory policy at
+// path that the user approved.
+func approvalRecord(home, path string) string {
+	sum := sha256.Sum256([]byte(path))
+	return filepath.Join(home, ".config", "gr8", "approved", hex.EncodeToString(sum[:])+".yaml")
+}
+
 // ApprovePolicy returns raw if file may be used as it is: trusted, or the same as
 // the last approved copy. Otherwise it shows ask what it would grant, or what
 // changed since its approval, and records the approval if ask says yes.
@@ -322,8 +329,7 @@ func ApprovePolicy(file PolicyFile, raw []byte, home string, ask func(prompt str
 	if file.Trusted {
 		return nil
 	}
-	sum := sha256.Sum256([]byte(file.Path))
-	record := filepath.Join(home, ".config", "gr8", "approved", hex.EncodeToString(sum[:])+".yaml")
+	record := approvalRecord(home, file.Path)
 	approved, err := os.ReadFile(record)
 	switch {
 	case err == nil && string(approved) == string(raw):

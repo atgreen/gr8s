@@ -129,6 +129,29 @@ cluster's own, 2 when the lookup failed or no address is free."
               (multiple-value-bind (ttl rcode) (%egress-refresh table entry now)
                 (if ttl (values (egress-name-address entry) ttl) (values nil rcode))))))))
 
+(defparameter +egress-ask-ttl+ 10
+  "Seconds a reserved name's address is good for: brief, so a name the user didn't
+allow isn't held long.")
+
+(defun egress-name-reserve (table name)
+  "A synthetic address for NAME without looking it up (podster-3zu0). A Pod in ask mode
+is answered with one for a name its policy doesn't allow, so the name leaves the node
+only once the user allows it, when the proxy resolves it. Returns (values address ttl),
+or NIL when no address is free."
+  (let* ((name (%egress-canonical-name name))
+         (now (funcall (egress-name-table-clock table)))
+         (entry (bt:with-lock-held ((egress-name-table-lock table)) (%egress-allocate table name now))))
+    (when entry
+      (bt:with-lock-held ((egress-name-lock entry))
+        (setf (egress-name-last-used entry) now))
+      (values (egress-name-address entry) +egress-ask-ttl+))))
+
+(defun egress-name-at (table address)
+  "The name synthetic ADDRESS stands for, without looking it up; NIL when none."
+  (let ((entry (bt:with-lock-held ((egress-name-table-lock table))
+                 (gethash address (egress-name-table-by-address table)))))
+    (and entry (egress-name-name entry))))
+
 (defun egress-name-for-connect (table address)
   "The name synthetic ADDRESS stands for and its pinned real addresses, refreshing
 an expired mapping first: (values name addresses), or NIL when ADDRESS names nothing

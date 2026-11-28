@@ -32,10 +32,12 @@ var gr8Calls = func() []APICall {
 			calls = append(calls, APICall{group, resource, verb, namespaced})
 		}
 	}
-	add("", "pods", true, "create", "get", "delete")
+	add("", "pods", true, "create", "get", "delete", "patch")
 	add("", "pods/exec", true, "create", "get")
 	add("", "secrets", true, "create", "get", "update", "patch", "delete")
 	add("agents.kruise.io", "securityprofiles", true, "create", "get", "update", "patch", "delete")
+	// What the node refused the run, told at its end.
+	add("gr8s.io", "flows", true, "list", "watch")
 	add("", "nodes", false, "get", "list")
 	add("", "namespaces", false, "get")
 	add("gr8.gr8s.io", "sandboxprofiles", false, "create", "get", "list", "update", "delete")

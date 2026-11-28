@@ -54,8 +54,8 @@ and the ranges user namespaces map.")
 
 (defun gr8-user-rbac (identity namespace)
   "The Role, RoleBinding, ClusterRole and ClusterRoleBinding granting IDENTITY what gr8
-calls, and no more: Pods, their exec, Secrets and SecurityProfiles in NAMESPACE, its
-own; reading Nodes and NAMESPACE itself; and the cluster-scoped SandboxProfiles and
+calls, and no more: Pods, their exec, Secrets, SecurityProfiles and flow events in
+NAMESPACE, its own; reading Nodes and NAMESPACE itself; and the cluster-scoped SandboxProfiles and
 ClusterNetworkPolicies gr8 makes for a run, which podster-tcr8 holds to NAMESPACE."
   (let* ((name (concatenate 'string "gr8s:" identity))
          (labels (core-object "app.kubernetes.io/managed-by" "gr8"))
@@ -74,7 +74,9 @@ ClusterNetworkPolicies gr8 makes for a run, which podster-tcr8 holds to NAMESPAC
              (core-object "apiVersion" "rbac.authorization.k8s.io/v1" "kind" "Role" "metadata" (meta namespace)
                           "rules" (vector (rule #("") #("pods" "secrets") verbs)
                                           (rule #("") #("pods/exec") #("get" "create"))
-                                          (rule #("agents.kruise.io") #("securityprofiles") verbs))))
+                                          (rule #("agents.kruise.io") #("securityprofiles") verbs)
+                                          ;; The node's verdicts on their own runs: what was refused.
+                                          (rule #("gr8s.io") #("flows") #("get" "list" "watch")))))
        (list "rolebindings" namespace
              (core-object "apiVersion" "rbac.authorization.k8s.io/v1" "kind" "RoleBinding" "metadata" (meta namespace)
                           "subjects" subjects

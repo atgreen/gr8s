@@ -11,6 +11,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -52,6 +53,8 @@ type Options struct {
 	Placeholders []string
 	// PlaceholderFiles are credential files the sandbox sees with stand-in tokens.
 	PlaceholderFiles []string
+	// policyFile is the policy file this run uses, when it has one.
+	policyFile *PolicyFile
 }
 
 // Run runs options.Command in a gr8 Pod and returns its exit status.
@@ -130,6 +133,9 @@ func Run(options Options) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// At a terminal, the user is asked about a host the policy refuses (podster-3zu0).
+	interactive := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) &&
+		term.IsTerminal(int(os.Stderr.Fd()))
 	pod := NewPod(PodRequest{
 		Namespace: options.Namespace,
 		Node:      node,
@@ -138,6 +144,7 @@ func Run(options Options) (int, error) {
 		Command:   filepath.Base(options.Command[0]),
 		Identity:  identity,
 		GPU:       !options.NoGPU && offersGPU(nodeObject),
+		Ask:       interactive,
 		Resources: resources,
 	}, randomSuffix())
 	// The policy goes first, so the command never starts without it.
@@ -189,6 +196,38 @@ func Run(options Options) (int, error) {
 	if err := waitRunning(ctx, clientset, pod); err != nil {
 		return 0, err
 	}
+	// What policy refuses the run is asked about as it happens, at a terminal, and told
+	// at its end, with an offer to allow it.
+	var gate *terminalGate
+	var onPending func(string)
+	var madePolicy atomic.Bool
+	if interactive {
+		gate = newTerminalGate(os.Stdin, os.Stdout, func() (int, int) {
+			width, height, _ := term.GetSize(int(os.Stdout.Fd()))
+			return width, height
+		}, nil)
+		command := filepath.Base(options.Command[0])
+		onPending = func(host string) {
+			answer := gate.Ask(fmt.Sprintf("%s wants %s, which its policy doesn't allow.", command, host),
+				" Allow [o]nce, [a]lways, [n]o?", "oan", 'n')
+			made, err := decideRunHost(ctx, clientset, options.Namespace, pod.Name, host, answer != 'n')
+			if made {
+				madePolicy.Store(true)
+			}
+			if err == nil && answer == 'a' {
+				err = allowInPolicy([]string{host}, options.policyFile, command, home)
+			}
+			if err != nil {
+				gate.Say(fmt.Sprintf("%s: %v", host, err))
+			}
+		}
+	}
+	refused := watchRefusals(ctx, clientset, options.Namespace, pod.Name, onPending)
+	defer func() {
+		if madePolicy.Load() {
+			deleteAllowPolicy(clientset, pod.Name)
+		}
+	}()
 
 	grant := Profile(options.Command[0], home, clusterProfiles(ctx, clientset, options.Namespace))
 	if policy != nil {
@@ -211,7 +250,18 @@ func Run(options Options) (int, error) {
 	argv := append([]string{HostRoot + launcher, sandbox.Internal, "launch", "--cwd", cwd, "--home", home},
 		launchFlags(options)...)
 	argv = append(append(argv, "--"), options.Command...)
-	return execInPod(ctx, config, clientset, pod, argv)
+	status, err := execInPod(ctx, config, clientset, pod, argv, gate)
+	var ask func(string) bool
+	switch {
+	case gate != nil:
+		// The terminal's keys now come from the gate, which no longer feeds the command.
+		gate.Detach()
+		ask = TerminalAsk(gate.After(), os.Stderr)
+	case term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd())):
+		ask = TerminalAsk(os.Stdin, os.Stderr)
+	}
+	offerToAllow(refused.Stop(), options.policyFile, options.Command[0], home, ask)
+	return status, err
 }
 
 // offersGPU says whether node offers GPU render nodes to Pods.
@@ -245,6 +295,7 @@ func loadPolicy(options *Options, home, cwd string) (*Policy, []string, error) {
 		return nil, nil, err
 	}
 	options.logf("policy %s", file.Path)
+	options.policyFile = &file
 	var values []string
 	for _, credential := range policy.Spec.valueCredentials() {
 		value, err := CredentialValue(credential.From, home, os.Getenv)
@@ -490,7 +541,7 @@ func deletePod(clientset kubernetes.Interface, pod *corev1.Pod) {
 }
 
 func execInPod(ctx context.Context, config *rest.Config, clientset kubernetes.Interface,
-	pod *corev1.Pod, argv []string) (int, error) {
+	pod *corev1.Pod, argv []string, gate *terminalGate) (int, error) {
 	tty := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 	request := clientset.CoreV1().RESTClient().Post().
 		Resource("pods").Namespace(pod.Namespace).Name(pod.Name).SubResource("exec").
@@ -517,6 +568,12 @@ func execInPod(ctx context.Context, config *rest.Config, clientset kubernetes.In
 		defer sizes.stop()
 		streams.Tty = true
 		streams.TerminalSizeQueue = sizes
+		if gate != nil {
+			// The gate's questions go between the terminal and the command, which
+			// redraws its screen after one.
+			gate.redraw = sizes.nudge
+			streams.Stdin, streams.Stdout = gate, gate
+		}
 	} else {
 		streams.Stderr = os.Stderr
 		// Without a terminal, ^C reaches gr8, not the command: end the
@@ -582,6 +639,24 @@ func (sizes *terminalSizes) Next() *remotecommand.TerminalSize {
 	case <-sizes.done:
 		return nil
 	}
+}
+
+// nudge reports the terminal a row shorter, then as it is, so a full-screen program
+// draws its screen again after gr8 wrote across it.
+func (sizes *terminalSizes) nudge() {
+	width, height, err := term.GetSize(sizes.fd)
+	if err != nil || height < 2 {
+		return
+	}
+	go func() {
+		for _, rows := range []int{height - 1, height} {
+			select {
+			case sizes.sizes <- remotecommand.TerminalSize{Width: uint16(width), Height: uint16(rows)}:
+			case <-sizes.done:
+				return
+			}
+		}
+	}()
 }
 
 func (sizes *terminalSizes) stop() {
