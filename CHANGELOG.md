@@ -128,6 +128,10 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- `gr8` offers to move a login it knows into the cluster the first time a command
+  that uses it runs without it (podster-pojp), so `gr8 claude` on a fresh desktop
+  needs no `gr8 --login claude` first. It asks only on a terminal, defaults to
+  yes, and remembers a no in `~/.config/gr8/declined-logins`.
 - A local user gets gr8 without sudo (podster-7uof). `gr8s-server` listens on
   `/run/gr8s/gr8.sock`, knows who connects from the kernel (`SO_PEERCRED`), and
   answers with their own kubeconfig, after making their namespace and grant. gr8
