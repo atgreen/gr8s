@@ -96,3 +96,44 @@
     (let ((parsed (gethash "spec" (gr8s.model::pod-to-object (parse-pod object)))))
       (is (null (nth-value 1 (gethash "schedulingGroup" parsed))))
       (is (null (nth-value 1 (gethash "stopSignal" (gethash "lifecycle" (aref (gethash "containers" parsed) 0)))))))))
+
+(test container-stop-signals-arrive-with-v1-38
+  ;; podster-i18c.4: ContainerStopSignals is beta and on by default from v1.38. The API keeps
+  ;; lifecycle.stopSignal, checks it against the Pod's OS as upstream does, and the runtime
+  ;; stops the container with it.
+  (is-true (gr8s.foundation::kubernetes-minor-at-least-p 37))
+  (is-false (gr8s.foundation::kubernetes-minor-at-least-p 99))
+  (flet ((pod-with (signal &optional os)
+           (let* ((object (file-key-pod-object (file-key-selector)))
+                  (spec (gethash "spec" object)))
+             (setf (gethash "lifecycle" (aref (gethash "containers" spec) 0))
+                   (gr8s.resources::core-object "stopSignal" signal))
+             (when os (setf (gethash "os" spec) (gr8s.resources::core-object "name" os)))
+             object))
+         (kept-signal (object)
+           (gethash "stopSignal" (gethash "lifecycle" (aref (gethash "containers"
+                                                                     (gethash "spec" (gr8s.model::pod-to-object (parse-pod object))))
+                                                              0)))))
+    (with-replaced-functions ((gr8s.foundation::kubernetes-minor-at-least-p (lambda (minor) (<= minor 38))))
+      (is (equal "SIGUSR1" (kept-signal (pod-with "SIGUSR1" "linux"))))
+      (is (equal "SIGRTMIN+3" (kept-signal (pod-with "SIGRTMIN+3" "linux"))))
+      (is (equal "SIGTERM" (kept-signal (pod-with "SIGTERM" "windows"))))
+      (signals gr8s.model:kubernetes-error (parse-pod (pod-with "SIGUSR1")))
+      (signals gr8s.model:kubernetes-error (parse-pod (pod-with "SIGUSR1" "windows")))
+      (signals gr8s.model:kubernetes-error (parse-pod (pod-with "SIGNOPE" "linux")))))
+  ;; The runtime's names for them, both ways.
+  (is (= 23 (gr8s.runtime.containerd::cri-stop-signal "SIGTERM")))
+  (is (= gr8s.cri.v1::+signal-sigrtminplus1+ (gr8s.runtime.containerd::cri-stop-signal "SIGRTMIN+1")))
+  (is (= gr8s.cri.v1::+signal-sigrtmaxminus1+ (gr8s.runtime.containerd::cri-stop-signal "SIGRTMAX-1")))
+  (is (= 0 (gr8s.runtime.containerd::cri-stop-signal nil)))
+  (is (every (lambda (name) (plusp (gr8s.runtime.containerd::cri-stop-signal name)))
+             gr8s.runtime.containerd::+linux-stop-signals+))
+  (is (= (length gr8s.runtime.containerd::+linux-stop-signals+)
+         (length (remove-duplicates (mapcar #'gr8s.runtime.containerd::cri-stop-signal
+                                            gr8s.runtime.containerd::+linux-stop-signals+)))))
+  (is (equal "SIGRTMAX-1" (gr8s.runtime.containerd::cri-stop-signal-name gr8s.cri.v1::+signal-sigrtmaxminus1+)))
+  (is (null (gr8s.runtime.containerd::cri-stop-signal-name 0)))
+  ;; The container's config carries it.
+  (is (= gr8s.cri.v1::+signal-sigusr1+ (gr8s.cri.v1::stop-signal
+             (gr8s.runtime.containerd::make-cri-container-config :name "c" :image "i" :stop-signal "SIGUSR1"))))
+  (is (= 0 (gr8s.cri.v1::stop-signal (gr8s.runtime.containerd::make-cri-container-config :name "c" :image "i")))))

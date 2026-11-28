@@ -85,6 +85,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Added
 
+- Container `lifecycle.stopSignal`, for Kubernetes 1.38 (podster-i18c.4): kept and
+  checked against the Pod's `spec.os.name`, passed to containerd as the container's stop
+  signal, and reported in `status.containerStatuses[].stopSignal`. It turns on with the
+  move to 1.38, as upstream's ContainerStopSignals does; until then the field is dropped,
+  as in 1.37.
 - The join page keeps its device's screen awake while the tab is a node
   (podster-2yfv), so a phone or laptop that would lock and sleep stays in the
   cluster. The browser lets go of the lock while the page is hidden, and the page

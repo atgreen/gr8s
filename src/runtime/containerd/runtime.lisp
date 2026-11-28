@@ -205,12 +205,17 @@ exiting mid-call still abandon it."
                (core-object "reason" (if (= (cri-container-info-state info)
                                               gr8s.cri.v1::+containerstate-container_created+)
                                          "ContainerCreating" "ContainerStatusUnknown")))))
-    (core-object "name" (or (cri-container-info-name info)
-                            (cdr (assoc +gr8s-container-label+ (cri-container-info-labels info) :test #'equal)))
-                 "containerID" id "image" (or (cri-container-info-image info) "")
-                 "imageID" (or (cri-container-info-image-ref info) "")
-                 "restartCount" (cri-container-info-attempt info)
-                 "ready" running "started" running "state" state)))
+    (let ((status (core-object "name" (or (cri-container-info-name info)
+                                          (cdr (assoc +gr8s-container-label+ (cri-container-info-labels info) :test #'equal)))
+                               "containerID" id "image" (or (cri-container-info-image info) "")
+                               "imageID" (or (cri-container-info-image-ref info) "")
+                               "restartCount" (cri-container-info-attempt info)
+                               "ready" running "started" running "state" state))
+          (stop-signal (cri-stop-signal-name (cri-container-info-stop-signal info))))
+      ;; The signal the runtime stops it with, as a kubelet reports from v1.38 (ContainerStopSignals).
+      (when (and stop-signal (gr8s.foundation::kubernetes-minor-at-least-p 38))
+        (setf (gethash "stopSignal" status) stop-signal))
+      status)))
 
 (defmethod runtime-observe ((runtime containerd-runtime) uid)
   (call-containerd-runtime
@@ -455,6 +460,9 @@ A container running as any user can write here, and a user mount at the path tak
              :stdin (gethash "stdin" (pod-runtime-container-object pod spec))
              :stdin-once (gethash "stdinOnce" (pod-runtime-container-object pod spec))
              :tty (gethash "tty" (pod-runtime-container-object pod spec))
+             :stop-signal (let ((lifecycle (gethash "lifecycle" (pod-runtime-container-object pod spec))))
+                            (and (hash-table-p lifecycle) (stringp (gethash "stopSignal" lifecycle))
+                                 (gethash "stopSignal" lifecycle)))
              :uid (pod-uid pod)
              :cdi-device-ids
              (append (runtime-container-cdi-device-ids

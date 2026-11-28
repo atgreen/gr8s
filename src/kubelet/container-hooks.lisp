@@ -66,9 +66,11 @@
     (when lifecycle
       (drop-null-fields (require-object lifecycle "lifecycle"))
       ;; ContainerStopSignals is alpha and off by default in v1.37, so the API server drops
-      ;; stopSignal from a new Pod rather than refusing it.
-      (remhash "stopSignal" lifecycle)
-      (reject-unsupported-fields lifecycle '("postStart" "preStop") "lifecycle")
+      ;; stopSignal from a new Pod rather than refusing it; it is beta and on from v1.38, and the
+      ;; Pod's spec checks the signal against its OS (validate-pod-stop-signals).
+      (unless (gr8s.foundation::kubernetes-minor-at-least-p 38)
+        (remhash "stopSignal" lifecycle))
+      (reject-unsupported-fields lifecycle '("postStart" "preStop" "stopSignal") "lifecycle")
       (dolist (kind '("postStart" "preStop"))
         (when (gethash kind lifecycle)
           (validate-container-lifecycle-handler (gethash kind lifecycle) (format nil "lifecycle.~A" kind)))))))
@@ -290,3 +292,27 @@
                                     (pod-namespace pod) (pod-name pod) condition)))
                      (forget-container-hook-job manager key)))
                  :name (format nil "sidecar shutdown ~A" (pod-name pod)))))))))
+
+(defun validate-pod-stop-signals (spec)
+  "Check each container's lifecycle.stopSignal against SPEC's operating system, as upstream does:
+a Pod must name its OS to use one, a Windows Pod may stop only with SIGKILL or SIGTERM, and a
+Linux Pod with any signal Linux has."
+  (let ((os (let ((os (gethash "os" spec))) (and (hash-table-p os) (gethash "name" os)))))
+    (dolist (kind '("initContainers" "containers" "ephemeralContainers"))
+      (loop for container across (let ((list (gethash kind spec))) (if (vectorp list) list #()))
+            for index from 0
+            for lifecycle = (and (hash-table-p container) (gethash "lifecycle" container))
+            for signal = (and (hash-table-p lifecycle) (gethash "stopSignal" lifecycle))
+            when signal
+              do (let ((field (format nil "spec.~A[~D].lifecycle.stopSignal" kind index)))
+                   (cond ((not (stringp signal))
+                          (invalid-pod "~A: Invalid value: must be a signal name" field))
+                         ((null os)
+                          (invalid-pod "~A: Forbidden: may not be set for containers with empty `spec.os.name`" field))
+                         ((equal os "windows")
+                          (unless (member signal '("SIGKILL" "SIGTERM") :test #'equal)
+                            (invalid-pod "~A: Unsupported value: ~S: supported values: \"SIGKILL\", \"SIGTERM\""
+                                         field signal)))
+                         ((equal os "linux")
+                          (unless (member signal gr8s.runtime.containerd::+linux-stop-signals+ :test #'equal)
+                            (invalid-pod "~A: Unsupported value: ~S" field signal)))))))))

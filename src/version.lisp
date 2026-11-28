@@ -17,6 +17,13 @@
   (let ((parts (uiop:split-string (version-string:get-base-version :gr8s) :separator '(#\.))))
     (values (or (first parts) "1") (or (second parts) "0"))))
 
+(defun kubernetes-minor-at-least-p (minor)
+  "Whether the Kubernetes version gr8s implements is 1.MINOR or later. What upstream turns
+on by default in 1.MINOR is on in gr8s from then, and off before, as upstream's is."
+  (let ((implemented (ignore-errors (parse-integer (nth-value 1 (kubernetes-api-version-components))
+                                                   :junk-allowed t))))
+    (and implemented (>= implemented minor))))
+
 (defun kubernetes-git-version ()
   "The Kubernetes-style gitVersion string clients see (e.g. in /version and a
    Node's kubeletVersion): the gr8s build version with a leading \"v\". A release
