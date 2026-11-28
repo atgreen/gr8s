@@ -90,6 +90,10 @@ the host:
   the Pod's own, so it can't see your other processes. `/run` and `/tmp` are
   fresh: your host's sockets, such as your SSH agent, are not there, only the
   display and audio sockets the sandbox is given (see below).
+- **Git worktrees.** Started in a git worktree, the command may also write the
+  repository's shared git directory, where commits and refs go, and its `.beads`
+  database, beside the main checkout. Neither is under the worktree, and without
+  them git couldn't commit and `bd` would start an empty database in the worktree.
 - **Home.** `$HOME` is private. It holds only what `--ro`, `--rw` and the
   command's SandboxProfile grant, and git's configuration (`~/.gitconfig`,
   `~/.config/git`). A granted file the command saves is copied back when it

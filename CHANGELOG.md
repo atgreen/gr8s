@@ -33,6 +33,10 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- `gr8` run in a git worktree lets the command write the repository's shared git
+  directory and its `.beads` database (podster-0ii.10). Neither is under the
+  worktree: git couldn't commit, and `bd` silently started an empty database in the
+  worktree, which the host's `bd` then preferred, so beads seemed to disappear.
 - An egress-only NetworkPolicy no longer cuts a Pod off from its own node
   (podster-zx0m). The node reaches its Pods from the node gateway (169.254.1.1, or
   fe80::1), which the ingress guard left unrecorded, so since egress policy started
