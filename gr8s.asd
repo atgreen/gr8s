@@ -7,6 +7,24 @@
 ;;;; mirrors architectural dependencies so later modules can rely on the public
 ;;;; abstractions established by earlier files.
 
+;;; A source file that reads other files at compile time, with #. (the dashboard pages and
+;;; browser-node runtime it serves). ASDF doesn't take a :static-file dependency to make the
+;;; fasl stale, so editing only an embedded file left the old copy built in (podster-qihf).
+;;; Naming them as the compile's input files does: a name with a / is from the system's
+;;; root, as dashboard-agent-asset-text reads it, and any other is beside the source.
+(defclass embedding-source-file (asdf:cl-source-file)
+  ((embeds :initarg :embeds :initform '() :reader embedding-source-file-embeds)))
+
+(defmethod asdf:input-files ((operation asdf:compile-op) (component embedding-source-file))
+  ;; An asset not fetched yet (the xterm and graph bundles) embeds as NIL, so it isn't an input.
+  (append (call-next-method)
+          (remove-if-not #'probe-file
+                         (mapcar (lambda (name)
+                                   (if (find #\/ name)
+                                       (asdf:system-relative-pathname (asdf:component-system component) name)
+                                       (merge-pathnames name (asdf:component-pathname component))))
+                                 (embedding-source-file-embeds component)))))
+
 (asdf:defsystem "gr8s"
   :description "A small Kubernetes-compatible control plane in Common Lisp"
   :author "gr8s contributors"
@@ -525,18 +543,26 @@
                                            (:file "mcp")
                                            (:file "hubble-observer")
                                            (:static-file "dashboard-agent.html")
-                                           (:file "dashboard-agent" :depends-on ("dashboard-agent.html"))
+                                           (:embedding-source-file "dashboard-agent" :depends-on ("dashboard-agent.html")
+                                            :embeds ("dashboard-agent.html" "assets/xterm/xterm.js"
+                                                     "assets/xterm/xterm.css" "assets/xterm/addon-fit.js"))
                                            (:static-file "browser-node.html")
                                            (:static-file "browser-node-runtime.mjs")
                                            (:file "browser-network")
                                            (:file "browser-images")
                                            (:file "browser-stun")
-                                           (:file "browser-nodes" :depends-on ("dashboard-agent" "browser-network" "browser-stun" "browser-node.html" "browser-node-runtime.mjs"))
+                                           (:embedding-source-file "browser-nodes" :depends-on ("dashboard-agent" "browser-network" "browser-stun" "browser-node.html" "browser-node-runtime.mjs")
+                                            :embeds ("browser-node.html" "browser-node-runtime.mjs"))
                                            (:file "browser-content" :depends-on ("browser-nodes" "browser-images"))
                                            (:static-file "dashboard-lisp.html")
-                                           (:file "dashboard-lisp" :depends-on ("dashboard-lisp.html" "dashboard-agent"))
+                                           (:embedding-source-file "dashboard-lisp" :depends-on ("dashboard-lisp.html" "dashboard-agent")
+                                            :embeds ("dashboard-lisp.html"))
                                            (:static-file "dashboard-network.html")
-                                           (:file "dashboard-network" :depends-on ("dashboard-network.html" "dashboard-agent"))
+                                           (:embedding-source-file "dashboard-network" :depends-on ("dashboard-network.html" "dashboard-agent")
+                                            :embeds ("dashboard-network.html" "assets/graph/cytoscape.js"
+                                                     "assets/graph/layout-base.js" "assets/graph/cose-base.js"
+                                                     "assets/graph/cytoscape-fcose.js" "assets/graph/dagre.js"
+                                                     "assets/graph/cytoscape-dagre.js"))
                                            (:file "dashboard-shell")
                                            (:file "dashboard-apps")
                                            (:file "reconciliation-metrics")
