@@ -9,6 +9,10 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Security
 
+- Streaming into a Pod over a WebSocket (exec, attach and port-forward as a GET) needs
+  `get` as well as `create` on the subresource, as upstream requires
+  (AuthorizePodWebsocketUpgradeCreatePermission, GA in 1.38; podster-i18c.3). gr8s
+  checked `create` alone.
 - Every authenticated identity could GET any single named object without an RBAC
   grant, Secrets included (podster-8kxy). The discovery URLs every authenticated user
   may read (`/api/*`, `/apis/*`) were matched against resource paths too, so any
