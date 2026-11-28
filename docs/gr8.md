@@ -40,6 +40,53 @@ means "could not resolve host".
 The RPM and DEB packages install `/usr/bin/gr8` next to `gr8s`. From a source
 tree, `make gr8` builds `build/gr8`.
 
+## Setting up
+
+On a machine with the package installed and no cluster yet, run gr8 once:
+
+```console
+$ gr8 claude
+gr8: No cluster is set up for gr8. Make this machine a gr8s node? (uses sudo) [y/N] y
+gr8: setting up a gr8s node on this machine; sudo will ask for your password
+gr8: starting gr8s-server
+gr8: waiting for this machine's node to be Ready
+gr8: ready; your kubeconfig is /home/you/.config/gr8/kubeconfig
+```
+
+`gr8 --setup` does the same without asking, and then runs the command if you name
+one. gr8 asks only on a terminal, and only when it finds no kubeconfig at all
+(none named, no `$KUBECONFIG`, no `~/.kube/config`).
+
+Setup runs `sudo gr8 --internal setup` once. That:
+
+- enables and starts `gr8s-server`, unless it is already running;
+- waits for this machine's node to be Ready;
+- creates your own namespace, `gr8-YOU`, where your runs, logins and their
+  Secrets live, out of other users' reach;
+- grants you, as the user `gr8:YOU`, what gr8 needs and no more: Pods, their
+  exec, Secrets and SecurityProfiles in `gr8-YOU`; reading Nodes and your
+  namespace; and the SandboxProfiles and ClusterNetworkPolicies gr8 creates for a
+  run;
+- writes your kubeconfig, with a client certificate for `gr8:YOU` and `gr8-YOU` as
+  its namespace, to `~/.config/gr8/kubeconfig`.
+
+gr8 runs in the kubeconfig's namespace when it is a gr8 one (`gr8` or `gr8-*`),
+and otherwise in `gr8`, so an administrator's kubeconfig behaves as before. It
+reads `~/.config/gr8/kubeconfig` after `--kubeconfig` and `$KUBECONFIG` and before
+`~/.kube/config`, so an existing kubectl setup is left as it is. Running setup
+again renews the grant and the file.
+
+**Setup is for users who already have sudo.** The credential is not the
+administrator's: it can't read other users' namespaces or change RBAC. But gr8's
+namespaces allow the privileged Pods gr8 makes, and the server doesn't yet tie a
+Pod there to its owner's UID, so whoever can create Pods in one can become root on
+the node. ClusterNetworkPolicies and SandboxProfiles are cluster-wide, so one
+user can also widen another's runs. The server-side checks that close both are
+podster-tcr8; until they land, don't grant gr8 to a user you wouldn't give sudo.
+
+A machine that runs `gr8s-agent` is part of a cluster elsewhere; setup refuses
+there.
+
 ## Running a command
 
 ```text
@@ -52,9 +99,10 @@ gr8 [flags] COMMAND [ARG...]
 | `--ro PATH` | Also allow reading PATH. Repeatable. |
 | `--rw PATH` | Also allow writing PATH. Repeatable. |
 | `--env NAME` | Pass environment variable NAME through. Repeatable. |
-| `--namespace NAME` | Namespace for the Pod (default `gr8`). |
+| `--namespace NAME` | Namespace for the Pod (default: the kubeconfig's when it is `gr8` or `gr8-*`, else `gr8`). |
 | `--node NAME` | Node to run on (default: the one with this host's address). |
-| `--kubeconfig FILE` | Kubeconfig (default: `$KUBECONFIG`, then `~/.kube/config`). |
+| `--kubeconfig FILE` | Kubeconfig (default: `$KUBECONFIG`, then `~/.config/gr8/kubeconfig`, then `~/.kube/config`). |
+| `--setup` | Make this machine a gr8s node for you (see Setting up), then run COMMAND if given. |
 | `--keep` | Keep the Pod, and any `--allow` policy, after the command exits. |
 | `--policy NAME\|FILE` | Use this policy instead of the command's own. |
 | `--login NAME` | Move a tool's login into the cluster (see Logins). |

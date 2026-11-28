@@ -596,3 +596,23 @@
           (grant #("get" "create"))
           (dolist (subresource '("exec" "attach" "portforward"))
             (is-true (allowed-p :get subresource))))))))
+
+(test a-user-kubeconfig-authenticates-as-that-user-and-no-one-else
+  ;; podster-q35k: gr8 setup hands the desktop user a credential that RBAC scopes,
+  ;; never the administrator's.
+  (with-temporary-pki (pki root)
+    (values root)
+    (multiple-value-bind (certificate key) (gr8s.apiserver::ensure-user-client-credentials pki "gr8:alice")
+      (is (probe-file key))
+      (let ((identity (gr8s.resources::certificate-api-identity
+                       (pure-tls:load-certificate-chain certificate)
+                       (gr8s.security::cluster-pki-ca-certificate pki))))
+        (is (equal "gr8:alice" (gr8s.resources::api-user-identity-username identity)))
+        (is (equalp #("system:authenticated") (gr8s.resources::api-user-identity-groups identity))))
+      ;; Asking again returns the same credential.
+      (is (equal (namestring certificate)
+                 (namestring (gr8s.apiserver::ensure-user-client-credentials pki "gr8:alice")))))
+    (dolist (name '("system:admin" "system:node:x" "" "../admin" "a/b" ":x"))
+      (signals error (gr8s.apiserver::ensure-user-client-credentials pki name)))
+    (signals error (gr8s.server::parse-kubeconfig-options '("--user" "system:masters")))
+    (is (equal "gr8:bob" (getf (gr8s.server::parse-kubeconfig-options '("--user" "gr8:bob")) :user)))))

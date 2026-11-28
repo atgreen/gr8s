@@ -82,6 +82,30 @@ server having picked a different one (podster-1v6)."
                                    :rotate-key rotate-key)))
     (values certificate key)))
 
+(defun kubeconfig-user-name-p (name)
+  "True when NAME may be a certificate user: a plain name, never system:*, so a
+generated credential can't claim a built-in identity."
+  (and (stringp name) (<= 1 (length name) 64)
+       (not (eql 0 (search "system:" name)))
+       (every (lambda (character) (or (alphanumericp character) (find character "._:@-"))) name)
+       (alphanumericp (char name 0))))
+
+(defun ensure-user-client-credentials (pki name)
+  "Return the persisted client identity for user NAME, in no group: what it may do is
+what RBAC grants NAME (podster-q35k)."
+  (unless (kubeconfig-user-name-p name)
+    (error "not a user name a kubeconfig may carry: ~S" name))
+  (let* ((directory (merge-pathnames "users/" (cluster-pki-root pki)))
+         (certificate (merge-pathnames (make-pathname :name name :type "crt") directory))
+         (key (merge-pathnames (make-pathname :name name :type "key") directory)))
+    (ensure-directories-exist directory)
+    (bt:with-lock-held ((cluster-pki-lock pki))
+      (finish-pending-leaf-rotation certificate key)
+      (unless (and (probe-file certificate) (probe-file key)
+                   (not (certificate-renewal-due-p certificate +certificate-leaf-renewal-seconds+)))
+        (issue-cluster-certificate pki certificate key name nil)))
+    (values certificate key)))
+
 (defclass gr8s-in-cluster-acceptor (gr8s-acceptor)
   ((certificate :initarg :certificate :reader in-cluster-certificate)
    (private-key :initarg :private-key :reader in-cluster-private-key)
