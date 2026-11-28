@@ -101,6 +101,11 @@ func Run(options Options) (int, error) {
 	// own SecurityProfiles, and those its policy names, applied for it alone. Their
 	// hosts are its to reach.
 	stored := storedLogins(ctx, clientset, options.Namespace, options.Command[0], logins)
+	// One the host holds but the cluster doesn't is offered, on a terminal (podster-pojp).
+	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd())) {
+		stored = offerLogins(options, home, filepath.Base(options.Command[0]), logins, stored,
+			TerminalConfirm(os.Stdin, os.Stderr))
+	}
 	var named []string
 	if policy != nil {
 		for _, name := range policy.Spec.loginNames() {

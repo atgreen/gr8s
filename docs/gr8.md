@@ -292,6 +292,18 @@ $ gr8 --logins                  # which logins gr8 knows, and which are stored
 $ gr8 --logout claude           # remove it from the cluster
 ```
 
+You don't have to do this first. When you run a command whose login gr8 knows, the
+host holds it and the cluster doesn't, gr8 asks on the terminal:
+
+```console
+$ gr8 claude
+gr8: claude's login is on this machine but not in the cluster, so the sandbox can't use it. Move it there, so the sandbox holds only stand-ins? [Y/n]
+```
+
+Yes does what `gr8 --login claude` does, then runs the command. No is remembered
+in `~/.config/gr8/declined-logins`, so gr8 doesn't ask again; `gr8 --login` still
+works. Without a terminal, gr8 doesn't ask.
+
 `gr8 --login NAME` copies the tool's tokens from its own file into the Secret
 `gr8/login-NAME`, and applies a SecurityProfile that injects the access token into
 requests to the login's hosts and, when the tool refreshes, handles the refresh
