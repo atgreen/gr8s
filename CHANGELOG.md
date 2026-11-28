@@ -23,6 +23,11 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- `gr8s dashboard` no longer quits when the API server is slow to answer
+  (podster-iumy). A read that ran out of time ended the dashboard with "Unhandled
+  TIMEOUT in thread gr8s network favicons": SBCL's timeout isn't an error, so the
+  thread's error handling missed it. It is now an ordinary error, and the dashboard
+  also ignores a timer that fires late, as `serve` does.
 - An idle HA member no longer spends most of a core checking Raft peer
   certificates (podster-480g). Every Raft message, and every node operation relayed
   between members, verified the peer's certificate again with two ECDSA checks,

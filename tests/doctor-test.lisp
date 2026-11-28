@@ -743,6 +743,27 @@
     (is (search "Could not read from the cluster: "
                 (first (gr8s-diagnose::read-failure-warnings))))))
 
+(test a-silent-api-server-is-an-error-not-a-fatal-timeout
+  ;; podster-iumy: a read the server never answers ran out of time with SBCL's TIMEOUT, a
+  ;; serious condition IGNORE-ERRORS doesn't catch, and one in a dashboard thread ended
+  ;; the dashboard. It is an ordinary error, naming the server.
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t))
+         (server (format nil "http://127.0.0.1:~D" (usocket:get-local-port listener)))
+         (accepted '()))
+    (unwind-protect
+         (let ((acceptor (bt:make-thread
+                          (lambda () (ignore-errors (push (usocket:socket-accept listener) accepted)))
+                          :name "silent server")))
+           (let ((condition (handler-case (progn (gr8s.server::doctor-api-get (list :server server) "/api" :seconds 1) nil)
+                              (error (error) error))))
+             (is (typep condition 'error))
+             (is (search "no answer from" (princ-to-string condition)))
+             (is (search server (princ-to-string condition))))
+           (is (null (ignore-errors (gr8s.server::doctor-api-get (list :server server) "/api" :seconds 1))))
+           (bt:join-thread acceptor))
+      (dolist (socket accepted) (ignore-errors (usocket:socket-close socket)))
+      (usocket:socket-close listener))))
+
 (test gr8s-doctor-diagnoses-without-kubectl
   ;; The whole run, as `gr8s doctor diagnose' makes it, with no kubectl on PATH.
   (with-core-api (store path)
