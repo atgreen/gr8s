@@ -548,3 +548,51 @@
           (is-true (allowed-p "/api/v1"))
           (is-true (allowed-p "/apis/apps/v1"))
           (is-true (allowed-p "/version")))))))
+
+(test a-websocket-stream-into-a-pod-needs-get-and-create
+  ;; podster-i18c.3: upstream authorizes the WebSocket GET for exec, attach and port-forward
+  ;; as get, then the connection as create (AuthorizePodWebsocketUpgradeCreatePermission,
+  ;; GA in 1.38). A POST, as SPDY clients send, needs create alone.
+  (with-temporary-store (store directory)
+    (let* ((pki (gr8s.security::ensure-cluster-pki (merge-pathnames "stream-pki/" directory)))
+           (ca (gr8s.security::cluster-pki-ca-certificate pki))
+           (leaf (certificate-api-test-subject-leaf pki '(((2 5 4 3) . "streamer"))))
+           (now (get-universal-time))
+           (authenticate (fdefinition 'gr8s.apiserver::cached-api-certificate-identity))
+           (gr8s.apiserver::*api-connection-certificate-chain* (list leaf))
+           (gr8s.apiserver::*api-connection-certificate-cache* (gr8s.apiserver::make-api-certificate-cache))
+           (path nil) (method nil))
+      (flet ((grant (verbs)
+               (ignore-errors (gr8s.resources::delete-core-resource store "clusterrolebindings" nil "streamer"))
+               (ignore-errors (gr8s.resources::delete-core-resource store "clusterroles" nil "streamer"))
+               (certificate-api-test-grant store "streamer"
+                 (gr8s.resources::core-object "kind" "User" "name" "streamer" "apiGroup" "rbac.authorization.k8s.io")
+                 (vector (gr8s.resources::core-object "apiGroups" #("") "verbs" verbs
+                                                      "resources" #("pods/exec" "pods/attach" "pods/portforward")))))
+             (allowed-p (request-method subresource)
+               (setf method request-method
+                     path (format nil "/api/v1/namespaces/default/pods/web/~A" subresource))
+               (handler-case (progn (gr8s.apiserver::authorize-in-cluster-request store :request) t)
+                 (kubernetes-error (condition)
+                   (is (= 403 (gr8s.model::kubernetes-error-status-code condition)))
+                   nil))))
+        (with-replaced-functions
+            ((gr8s.apiserver::cached-api-certificate-identity
+               (lambda (chain ca cache &optional ignored)
+                 (declare (ignore ignored)) (funcall authenticate chain ca cache now)))
+             (hunchentoot:header-in (lambda (&rest args) (declare (ignore args)) nil))
+             (hunchentoot:request-acceptor (lambda (request) (declare (ignore request)) :acceptor))
+             (gr8s.apiserver::in-cluster-client-ca (lambda (acceptor) (declare (ignore acceptor)) ca))
+             (hunchentoot:script-name (lambda (request) (declare (ignore request)) path))
+             (hunchentoot:request-method (lambda (request) (declare (ignore request)) method))
+             (hunchentoot:parameter (lambda (&rest args) (declare (ignore args)) nil)))
+          (grant #("create"))
+          (dolist (subresource '("exec" "attach" "portforward"))
+            (is-true (allowed-p :post subresource))
+            (is-false (allowed-p :get subresource)))
+          (grant #("get"))
+          (dolist (subresource '("exec" "attach" "portforward"))
+            (is-false (allowed-p :get subresource)))
+          (grant #("get" "create"))
+          (dolist (subresource '("exec" "attach" "portforward"))
+            (is-true (allowed-p :get subresource))))))))

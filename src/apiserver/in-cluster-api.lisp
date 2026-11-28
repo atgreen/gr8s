@@ -261,7 +261,14 @@ one then answers 404 rather than 403, as upstream's does."
                                                        :field-selector (hunchentoot:parameter "fieldSelector"))
         (unless (service-account-authorized-p store identity verb group resource name namespace path)
           (core-resource-error 403 "Forbidden" "User ~A is not allowed to ~A ~A"
-                               (api-identity-username identity) verb (or resource path)))))
+                               (api-identity-username identity) verb (or resource path)))
+        ;; Upstream authorizes the GET itself as get, then the connection as create
+        ;; (AuthorizePodWebsocketUpgradeCreatePermission): a stream into a Pod needs both.
+        (when (and (eq method :get) (equal group "")
+                   (member resource '("pods/exec" "pods/attach" "pods/portforward") :test #'equal)
+                   (not (service-account-authorized-p store identity "get" group resource name namespace path)))
+          (core-resource-error 403 "Forbidden" "User ~A is not allowed to get ~A"
+                               (api-identity-username identity) resource))))
     identity))
 
 (defvar *api-audit-sink* nil
