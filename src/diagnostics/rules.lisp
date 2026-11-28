@@ -69,4 +69,4 @@ an error, never a partial answer."
 
 (defun truth (value)
   "A JSON boolean as the atom the rules use; anything else unchanged."
-  (case value ((t) 'true) (:false 'false) (t value)))
+  (case value ((t) 'true) (:false 'false) (t value))) ; lint:suppress case-duplicate-key

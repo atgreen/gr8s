@@ -31,7 +31,7 @@ TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 OCICL ?= ocicl
 OCICL_STAMP := ocicl/.ocicl-installed
 
-.PHONY: xterm-assets graph-assets dashboard-assets-from-source dashboard-assets-compress test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
+.PHONY: xterm-assets graph-assets dashboard-assets-from-source dashboard-assets-compress test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory all help containerd-bundle dashboard-assets generate-protocol lint test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean deps
 
 all: native
 
@@ -226,6 +226,7 @@ help:
 	@echo "  dashboard-assets Refresh the embedded Headlamp frontend from the pinned image (always built in)"
 	@echo "  generate-protocol Generate Common Lisp node-protocol bindings"
 	@echo "  test-protocol-generation Verify standalone protocol generation from a clean output"
+	@echo "  lint             ocicl lint over src, tests and scripts, with .ocicl-lint.conf's exceptions"
 	@echo "  test          Run the unit and HTTP test suite"
 	@echo "  test-pod-transactions Test per-Pod consensus writes, conflicts, checkpoints and failover"
 	@echo "  test-pod-transaction-memory Update a large Pod population within a 384 MiB heap"
@@ -284,6 +285,11 @@ test-core-recovery: generate-protocol
 
 test-core-recovery-memory:
 	$(SBCL) --dynamic-space-size 384 --noinform $(LISP_BOOTSTRAP) --non-interactive --load scripts/test-core-recovery-memory.lisp
+
+# ocicl lint, with the exceptions in .ocicl-lint.conf. Every file is named: a directory
+# argument doesn't reach its subdirectories.
+lint:
+	ocicl lint $$(find src tests scripts -name '*.lisp' | sort)
 
 test: generate-protocol
 	python3 scripts/test-bootstrap.py
