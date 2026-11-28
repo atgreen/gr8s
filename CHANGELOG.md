@@ -41,6 +41,14 @@ the Kubernetes API version with a gr8s release suffix (see
 
 ### Fixed
 
+- A `gr8` command no longer dies when its machine sleeps or the network drops
+  (podster-dgi9). It ran on the exec stream, so a broken stream killed it, and gr8's
+  clean-up, run before the network was back, left its Pod behind. At a terminal it now
+  runs in a session the Pod keeps; gr8 reattaches when the stream breaks, and a
+  full-screen program redraws. Ctrl-C while reconnecting leaves it running for `gr8
+  --attach POD` (`gr8 --sessions` lists runs). gr8 Pods tolerate a not-ready or
+  unreachable node indefinitely; deletes are retried, and runs that ended with no
+  one there are removed by the next.
 - An HA member that applies a replicated change gives the Events it records that
   change's time, as intended, not its own clock (podster-8o0k). `*event-clock*` was
   bound in a file compiled before its `defvar`, so the binding was lexical and had no

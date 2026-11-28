@@ -102,6 +102,13 @@ func NewPod(request PodRequest, suffix string) *corev1.Pod {
 			EnableServiceLinks:            ptr(false),
 			TerminationGracePeriodSeconds: ptr(int64(1)),
 			ReadinessGates:                []corev1.PodReadinessGate{{ConditionType: NetworkReady}},
+			// The run is pinned to its user's machine: while that sleeps, its node goes
+			// not-ready, and the Pod waits for it rather than being evicted after five
+			// minutes (podster-dgi9).
+			Tolerations: []corev1.Toleration{
+				{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute},
+				{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute},
+			},
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsUser:          ptr(request.Identity.UID),
 				RunAsGroup:         ptr(request.Identity.GID),

@@ -184,3 +184,27 @@ func TestAQuestionFitsOneRowAndAlwaysShowsItsAnswers(t *testing.T) {
 		}
 	}
 }
+
+func TestKeysTypedAfterAStreamBreaksGoToTheNextOne(t *testing.T) {
+	keys, typing := io.Pipe()
+	gate := newTerminalGate(keys, &safeBuffer{}, nil, nil)
+	// The first stream's copier is still reading when its stream breaks.
+	first, done := gate.Attempt()
+	stale := make(chan error, 1)
+	go func() {
+		_, err := first.Read(make([]byte, 16))
+		stale <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	done()
+	if err := <-stale; err != io.EOF {
+		t.Fatalf("the broken stream's reader got %v, want EOF", err)
+	}
+	second, _ := gate.Attempt()
+	go func() { _, _ = typing.Write([]byte("\x03")) }()
+	buffer := make([]byte, 16)
+	if n, err := second.Read(buffer); err != nil || string(buffer[:n]) != "\x03" {
+		t.Errorf("the next stream got %q, %v; the ^C was lost", buffer[:n], err)
+	}
+	typing.Close()
+}

@@ -134,6 +134,29 @@ select a command, a user, or a single run. The command starts only once the
 node enforces the Pod's network policy (its `gr8s.io/NetworkReady` readiness
 gate), so its first connection is already under policy.
 
+## When the connection breaks
+
+At a terminal, the command runs in a session its Pod keeps, on a terminal of the
+Pod's own, and gr8 attaches to it. When the connection breaks, as when a laptop
+sleeps or the network drops, the command goes on; gr8 says on the bottom row that
+it is reconnecting, waits for the Pod, and attaches again, and a full-screen program
+such as Claude Code draws itself again, what you had typed still there.
+
+- **Ctrl-C while reconnecting**, or gr8's terminal closing, leaves the command
+  running: `gr8 --attach POD` comes back to it from any terminal, and `gr8
+  --sessions` lists your runs.
+- **A sleeping machine's Pod waits for it.** gr8 Pods tolerate their node being
+  not-ready or unreachable for as long as it is, rather than being evicted after
+  five minutes, as other Pods are.
+- **Nothing is left behind.** The run's Pod, policies and credentials go when the
+  command ends, however you were attached. A delete the cluster can't take yet, as
+  just after waking, is tried again for a minute, and the next run removes any of
+  yours whose command ended with no one there. A session whose command ended is kept
+  for an hour for its status to be collected.
+
+Without a terminal, as in a script, the command runs on the exec stream as before,
+and ends with it.
+
 ## What the command sees
 
 The command runs as you, with your user ID and groups, but in its own view of

@@ -61,6 +61,16 @@ type Options struct {
 func Run(options Options) (int, error) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
+	// What the run made is removed when it ends, last made first; not when the user
+	// leaves its session running (podster-dgi9).
+	var cleanups []func()
+	left := false
+	defer func() {
+		for i := len(cleanups) - 1; i >= 0 && !left; i-- {
+			cleanups[i]()
+		}
+	}()
+	cleanup := func(step func()) { cleanups = append(cleanups, step) }
 
 	config, clientset, err := clients(options.Kubeconfig)
 	if err != nil {
@@ -99,6 +109,8 @@ func Run(options Options) (int, error) {
 	if err := ensureNamespace(ctx, clientset, options.Namespace); err != nil {
 		return 0, err
 	}
+	// Sandboxes of the user's that ended with no one to clean them up go now.
+	reapEndedRuns(ctx, clientset, options.Namespace, identity.User)
 
 	// The logins this run carries: those stored for its command, applied by their
 	// own SecurityProfiles, and those its policy names, applied for it alone. Their
@@ -154,7 +166,7 @@ func Run(options Options) (int, error) {
 		}
 		options.logf("ClusterNetworkPolicy %s allows %v", pod.Name, options.Allow)
 		if !options.Keep {
-			defer deleteAllowPolicy(clientset, pod.Name)
+			cleanup(func() { deleteAllowPolicy(clientset, pod.Name) })
 		}
 	}
 	credentials, profile := 0, false
@@ -170,7 +182,7 @@ func Run(options Options) (int, error) {
 			return 0, err
 		}
 		if !options.Keep {
-			defer deletePolicyCredentials(clientset, pod, credentials, profile)
+			cleanup(func() { deletePolicyCredentials(clientset, pod, credentials, profile) })
 		}
 	}
 	pod, err = clientset.CoreV1().Pods(options.Namespace).Create(ctx, pod, metav1.CreateOptions{})
@@ -179,7 +191,7 @@ func Run(options Options) (int, error) {
 	}
 	options.logf("Pod %s/%s on node %s", pod.Namespace, pod.Name, node)
 	if !options.Keep {
-		defer deletePod(clientset, pod)
+		cleanup(func() { deletePod(clientset, pod) })
 	}
 	if policy != nil {
 		adoptPolicyCredentials(ctx, clientset, pod, credentials, profile)
@@ -189,7 +201,7 @@ func Run(options Options) (int, error) {
 				return 0, err
 			}
 			if !options.Keep {
-				defer deleteRunSandboxProfile(clientset, pod.Name)
+				cleanup(func() { deleteRunSandboxProfile(clientset, pod.Name) })
 			}
 		}
 	}
@@ -223,11 +235,11 @@ func Run(options Options) (int, error) {
 		}
 	}
 	refused := watchRefusals(ctx, clientset, options.Namespace, pod.Name, onPending)
-	defer func() {
+	cleanup(func() {
 		if madePolicy.Load() {
 			deleteAllowPolicy(clientset, pod.Name)
 		}
-	}()
+	})
 
 	grant := Profile(options.Command[0], home, clusterProfiles(ctx, clientset, options.Namespace))
 	if policy != nil {
@@ -250,7 +262,19 @@ func Run(options Options) (int, error) {
 	argv := append([]string{HostRoot + launcher, sandbox.Internal, "launch", "--cwd", cwd, "--home", home},
 		launchFlags(options)...)
 	argv = append(append(argv, "--"), options.Command...)
-	status, err := execInPod(ctx, config, clientset, pod, argv, gate)
+	var status int
+	if interactive {
+		// At a terminal the command runs in a session the Pod keeps, which outlives
+		// the connection (podster-dgi9).
+		status, left, err = runSession(ctx, config, clientset, pod, argv[0], argv, gate)
+		if left {
+			gate.Detach()
+			leftRunning(pod)
+			return 0, nil
+		}
+	} else {
+		status, err = execInPod(ctx, config, clientset, pod, argv, gate)
+	}
 	var ask func(string) bool
 	switch {
 	case gate != nil:
@@ -533,11 +557,19 @@ func podProblem(pod *corev1.Pod) string {
 	return string(pod.Status.Phase) + " " + pod.Status.Message
 }
 
+// deletePod deletes pod, trying again for a minute when the cluster can't be reached,
+// as just after a laptop wakes: a Pod left behind is a sandbox left running.
 func deletePod(clientset kubernetes.Interface, pod *corev1.Pod) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name,
-		metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))})
+	for delay, deadline := time.Second, time.Now().Add(time.Minute); ; delay = min(2*delay, 10*time.Second) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name,
+			metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))})
+		cancel()
+		if err == nil || apierrors.IsNotFound(err) || time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(delay)
+	}
 }
 
 func execInPod(ctx context.Context, config *rest.Config, clientset kubernetes.Interface,
@@ -572,7 +604,9 @@ func execInPod(ctx context.Context, config *rest.Config, clientset kubernetes.In
 			// The gate's questions go between the terminal and the command, which
 			// redraws its screen after one.
 			gate.redraw = sizes.nudge
-			streams.Stdin, streams.Stdout = gate, gate
+			stdin, done := gate.Attempt()
+			defer done()
+			streams.Stdin, streams.Stdout = stdin, gate
 		}
 	} else {
 		streams.Stderr = os.Stderr

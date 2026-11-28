@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -28,22 +29,42 @@ const (
 //	confine  applies Landlock and execs the command
 
 // Hold is the Pod container's main process: it waits for the Pod's deletion
-// and reaps the processes exec leaves behind, as PID 1 must.
+// and reaps the processes exec leaves behind, as PID 1 must. It also keeps the
+// session a command at a terminal runs in (podster-dgi9), and passes on its status;
+// once that is uncollected for an hour, it ends.
 func Hold() int {
+	s := &session{}
+	go serveSessions(s)
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, unix.SIGTERM, unix.SIGINT, unix.SIGCHLD)
-	for received := range signals {
-		if received != unix.SIGCHLD {
-			return 0
-		}
-		for {
-			var status unix.WaitStatus
-			if pid, err := unix.Wait4(-1, &status, unix.WNOHANG, nil); pid <= 0 || err != nil {
-				break
+	idle := time.NewTicker(time.Minute)
+	defer idle.Stop()
+	for {
+		select {
+		case <-idle.C:
+			if s.abandoned() {
+				return 0
+			}
+		case received := <-signals:
+			if received != unix.SIGCHLD {
+				return 0
+			}
+			for {
+				var status unix.WaitStatus
+				pid, err := unix.Wait4(-1, &status, unix.WNOHANG, nil)
+				if pid <= 0 || err != nil {
+					break
+				}
+				if pid == s.commandPid() {
+					code := status.ExitStatus()
+					if status.Signaled() {
+						code = 128 + int(status.Signal())
+					}
+					go s.ended(code)
+				}
 			}
 		}
 	}
-	return 0
 }
 
 // Launch runs inside the Pod, as the caller's uid. It starts "enter" in a
