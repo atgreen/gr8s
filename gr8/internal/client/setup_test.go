@@ -24,7 +24,7 @@ func allows(rules []rbacv1.PolicyRule, group, resource, verb string) bool {
 
 // Every API call gr8 makes, so a new one without a grant fails here, not on a desktop.
 func TestSetupRBACGrantsWhatGr8CallsAndNoMore(t *testing.T) {
-	role, binding, clusterRole, clusterBinding := SetupRBAC("gr8:alice", "gr8")
+	role, binding, clusterRole, clusterBinding := SetupRBAC("gr8:alice", "gr8-alice")
 	namespaced := map[[2]string][]string{
 		{"", "pods"}:                             {"create", "get", "delete"},
 		{"", "pods/exec"}:                        {"create", "get"},
@@ -71,7 +71,13 @@ func TestSetupRBACGrantsWhatGr8CallsAndNoMore(t *testing.T) {
 	if allows(clusterRole.Rules, "", "namespaces", "create") {
 		t.Error("the ClusterRole lets the user create namespaces")
 	}
-	if role.Namespace != "gr8" || binding.Namespace != "gr8" {
+	// The one namespace the user may read is their own.
+	for _, rule := range clusterRole.Rules {
+		if slices.Contains(rule.Resources, "namespaces") && !slices.Equal(rule.ResourceNames, []string{"gr8-alice"}) {
+			t.Errorf("namespaces granted beyond gr8-alice: %v", rule)
+		}
+	}
+	if role.Namespace != "gr8-alice" || binding.Namespace != "gr8-alice" {
 		t.Errorf("Role and RoleBinding in %q, %q", role.Namespace, binding.Namespace)
 	}
 	for _, subjects := range [][]rbacv1.Subject{binding.Subjects, clusterBinding.Subjects} {
@@ -135,5 +141,56 @@ func TestServerStateDirectoryFollowsServerEnv(t *testing.T) {
 		if got := ServerStateDirectory(environment); got != want {
 			t.Errorf("ServerStateDirectory(%q) = %q, want %q", environment, got, want)
 		}
+	}
+}
+
+func TestEachUserGetsANamespaceOfTheirOwn(t *testing.T) {
+	if UserNamespace("alice") == UserNamespace("bob") {
+		t.Error("two users share a namespace")
+	}
+	if got := UserNamespace("build_bot"); got != "gr8-build-bot" {
+		t.Errorf("UserNamespace(build_bot) = %q, want a valid namespace name", got)
+	}
+}
+
+const issuedKubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+  - name: gr8s
+    cluster:
+      server: https://127.0.0.1:6443
+contexts:
+  - name: gr8s
+    context:
+      cluster: gr8s
+      namespace: default
+      user: gr8s
+current-context: gr8s
+users:
+  - name: gr8s
+    user:
+      token: t
+`
+
+func TestTheUsersKubeconfigNamesTheirNamespaceAndGr8FollowsIt(t *testing.T) {
+	written, err := WithNamespace([]byte(issuedKubeconfig), "gr8-alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	path := filepath.Join(directory, "kubeconfig")
+	if err := os.WriteFile(path, written, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := DefaultNamespace(path); got != "gr8-alice" {
+		t.Errorf("DefaultNamespace(setup's kubeconfig) = %q, want gr8-alice", got)
+	}
+	// An administrator's kubeconfig names default: gr8 keeps to its own namespace.
+	admin := filepath.Join(directory, "admin")
+	if err := os.WriteFile(admin, []byte(issuedKubeconfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := DefaultNamespace(admin); got != "gr8" {
+		t.Errorf("DefaultNamespace(admin kubeconfig) = %q, want gr8", got)
 	}
 }

@@ -61,7 +61,7 @@ func run() int {
 	flags.StringVar(&options.Kubeconfig, "kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, then ~/.config/gr8/kubeconfig, then ~/.kube/config)")
 	flags.BoolVar(&setup, "setup", false, "make this machine a gr8s node for you (uses sudo), then run COMMAND if given")
 	flags.StringVar(&options.Node, "node", "", "node to run on (default: the node with this host's address)")
-	flags.StringVar(&options.Namespace, "namespace", "gr8", "namespace for the Pod")
+	flags.StringVar(&options.Namespace, "namespace", "", "namespace for the Pod (default: the kubeconfig's when it is gr8 or gr8-*, else gr8)")
 	flags.StringVar(&options.Image, "image", "registry.k8s.io/pause:3.10", "container image (its files are not used)")
 	flags.BoolVar(&options.Keep, "keep", false, "keep the Pod after the command exits")
 	flags.BoolVar(&options.NoDisplay, "no-display", false, "withhold the Wayland display")
@@ -93,6 +93,9 @@ func run() int {
 		if flags.NArg() == 0 && login == "" && logout == "" && !logins {
 			return 0
 		}
+	}
+	if options.Namespace == "" {
+		options.Namespace = client.DefaultNamespace(options.Kubeconfig)
 	}
 	switch {
 	case login != "":

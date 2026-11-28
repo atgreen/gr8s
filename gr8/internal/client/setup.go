@@ -20,6 +20,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 // SetupKubeconfig is where gr8 setup leaves the user's own kubeconfig. gr8 reads it
@@ -129,19 +130,88 @@ func setupAsRoot() error {
 	if err := waitForLocalNode(ctx, clientset); err != nil {
 		return err
 	}
-	identity := "gr8:" + user
-	if err := ensureNamespace(ctx, clientset, "gr8"); err != nil {
+	identity, namespace := "gr8:"+user, UserNamespace(user)
+	if err := ensureUserNamespace(ctx, clientset, namespace, os.Getenv("SUDO_UID")); err != nil {
 		return err
 	}
-	if err := applySetupRBAC(ctx, clientset, identity, "gr8"); err != nil {
+	if err := applySetupRBAC(ctx, clientset, identity, namespace); err != nil {
 		return err
 	}
+	var issued bytes.Buffer
 	command := exec.Command(gr8s, "kubeconfig", "--state-directory", state, "--user", identity)
-	command.Stdout, command.Stderr = os.Stdout, os.Stderr
+	command.Stdout, command.Stderr = &issued, os.Stderr
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("gr8s kubeconfig --user %s: %w", identity, err)
 	}
-	return nil
+	kubeconfig, err := WithNamespace(issued.Bytes(), namespace)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(kubeconfig)
+	return err
+}
+
+// UserNamespace is USER's own namespace: their runs, logins and Secrets live there,
+// out of every other user's reach.
+func UserNamespace(user string) string {
+	return "gr8-" + strings.ReplaceAll(user, "_", "-")
+}
+
+// ensureUserNamespace makes NAMESPACE, recording the UID of the user it belongs to
+// for the server's checks on what runs there (podster-tcr8).
+func ensureUserNamespace(ctx context.Context, clientset kubernetes.Interface, name, uid string) error {
+	namespaces := clientset.CoreV1().Namespaces()
+	namespace, err := namespaces.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		namespace, err = namespaces.Create(ctx, NewNamespace(name), metav1.CreateOptions{})
+	}
+	if err != nil {
+		return fmt.Errorf("namespace %s: %w", name, err)
+	}
+	if namespace.Annotations[OwnerUIDAnnotation] == uid {
+		return nil
+	}
+	if namespace.Annotations == nil {
+		namespace.Annotations = map[string]string{}
+	}
+	namespace.Annotations[OwnerUIDAnnotation] = uid
+	_, err = namespaces.Update(ctx, namespace, metav1.UpdateOptions{})
+	return err
+}
+
+// OwnerUIDAnnotation names the UID of the user a gr8 namespace belongs to.
+const OwnerUIDAnnotation = "gr8s.io/gr8-uid"
+
+// WithNamespace is KUBECONFIG with its current context's namespace set to NAMESPACE.
+func WithNamespace(kubeconfig []byte, namespace string) ([]byte, error) {
+	config, err := clientcmd.Load(kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("the issued kubeconfig: %w", err)
+	}
+	context := config.Contexts[config.CurrentContext]
+	if context == nil {
+		return nil, errors.New("the issued kubeconfig has no current context")
+	}
+	context.Namespace = namespace
+	return clientcmd.Write(*config)
+}
+
+// DefaultNamespace is the namespace gr8 runs in when none is named: the
+// kubeconfig's own when it is a gr8 one (gr8, or gr8-USER from gr8 --setup), else gr8.
+// An administrator's kubeconfig names default, which gr8 leaves alone.
+func DefaultNamespace(kubeconfig string) string {
+	if home, err := os.UserHomeDir(); err == nil {
+		kubeconfig = DefaultKubeconfig(kubeconfig, os.Getenv, home)
+	}
+	namespace, _, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		&clientcmd.ClientConfigLoadingRules{
+			ExplicitPath: kubeconfig,
+			Precedence:   clientcmd.NewDefaultClientConfigLoadingRules().Precedence,
+		}, &clientcmd.ConfigOverrides{}).Namespace()
+	if err == nil && (namespace == "gr8" || strings.HasPrefix(namespace, "gr8-")) {
+		return namespace
+	}
+	return "gr8"
 }
 
 func readFile(path string) string {
@@ -212,9 +282,9 @@ func nodeReady(node *corev1.Node) bool {
 }
 
 // SetupRBAC is what gr8 setup grants USER: what gr8 calls, and nothing more. Pods,
-// their exec, Secrets and SecurityProfiles in NAMESPACE; reading Nodes and
-// Namespaces; and the cluster-scoped SandboxProfiles and ClusterNetworkPolicies gr8
-// makes for a run.
+// their exec, Secrets and SecurityProfiles in NAMESPACE, the user's own; reading
+// Nodes, and NAMESPACE itself; and the cluster-scoped SandboxProfiles and
+// ClusterNetworkPolicies gr8 makes for a run.
 func SetupRBAC(user, namespace string) (*rbacv1.Role, *rbacv1.RoleBinding, *rbacv1.ClusterRole, *rbacv1.ClusterRoleBinding) {
 	name := "gr8s:gr8:" + strings.TrimPrefix(user, "gr8:")
 	labels := map[string]string{"app.kubernetes.io/managed-by": "gr8"}
@@ -229,7 +299,8 @@ func SetupRBAC(user, namespace string) (*rbacv1.Role, *rbacv1.RoleBinding, *rbac
 		{APIGroups: []string{"agents.kruise.io"}, Resources: []string{"securityprofiles"}, Verbs: edit},
 	}}
 	clusterRole := &rbacv1.ClusterRole{ObjectMeta: meta, Rules: []rbacv1.PolicyRule{
-		{APIGroups: []string{""}, Resources: []string{"nodes", "namespaces"}, Verbs: []string{"get", "list"}},
+		{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get", "list"}},
+		{APIGroups: []string{""}, Resources: []string{"namespaces"}, Verbs: []string{"get"}, ResourceNames: []string{namespace}},
 		{APIGroups: []string{"gr8.gr8s.io"}, Resources: []string{"sandboxprofiles"}, Verbs: edit},
 		{APIGroups: []string{"policy.networking.k8s.io"}, Resources: []string{"clusternetworkpolicies"}, Verbs: edit},
 	}}
