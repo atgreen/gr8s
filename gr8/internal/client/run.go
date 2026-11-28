@@ -191,6 +191,8 @@ func Run(options Options) (int, error) {
 	}
 	options.ReadOnly = append(grant.ReadOnly, options.ReadOnly...)
 	options.ReadWrite = append(grant.ReadWrite, options.ReadWrite...)
+	// A git worktree's repository, and the state tools keep beside it, lie outside it.
+	options.ReadWrite = append(options.ReadWrite, WorktreeShared(cwd)...)
 	options.PlaceholderFiles = grant.Placeholders
 	for name, value := range grant.Env {
 		options.Placeholders = append(options.Placeholders, name+"="+value)
