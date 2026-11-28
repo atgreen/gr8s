@@ -166,6 +166,11 @@ planner groups by: its name and its region/zone."
 (defparameter +desired-state-delta-capability+ "desired-state-delta"
   "The NodeHello capability of an agent that rebuilds snapshots from deltas.")
 
+(defparameter +default-node-max-connections+ 512
+  "Default cap on the node control-plane listener's concurrent connections. Every node
+holds one, and a server hosting browser nodes runs an agent, and a connection, for each
+of its tabs; ag-gRPC's own default of 128 would cap a cluster's nodes there.")
+
 (defparameter +default-node-max-connections-per-ip+ 32
   "Default cap on concurrent connections the node control-plane listener accepts
    from a single source address, passed through to the gRPC server. It bounds the
@@ -2411,12 +2416,16 @@ its underlay address and loopback, so no node can be issued another's kubelet id
                                             (clock #'get-universal-time)
                                             (gateway-stability-seconds 30)
                                             (max-connections-per-ip
-                                             +default-node-max-connections-per-ip+))
+                                             +default-node-max-connections-per-ip+)
+                                            (max-connections +default-node-max-connections+)
+                                            uncapped-source-p)
   "Create and start the node control-plane gRPC server on HOST:PORT: register the
    Connect service (and the Enrollment service when PKI is given), spawn its accept
    thread and the heartbeat monitor, and block until it is listening. Errors on a
-   non-positive heartbeat timeout or if the listener never comes up. Returns the
-   NODE-GRPC-SERVER (with its actual bound port)."
+   non-positive heartbeat timeout or if the listener never comes up. At most
+   MAX-CONNECTIONS are open at once, and MAX-CONNECTIONS-PER-IP from one source,
+   except loopback and sources UNCAPPED-SOURCE-P (of an ag-gRPC peer address key)
+   accepts. Returns the NODE-GRPC-SERVER (with its actual bound port)."
   (unless (plusp heartbeat-timeout-seconds)
     (error "Heartbeat timeout must be positive"))
   (unless (and (integerp gateway-stability-seconds)
@@ -2433,9 +2442,15 @@ its underlay address and loopback, so no node can be issued another's kubelet id
                                    (or node-prefixes node-prefix))
     (when (and wireguard-relay-address (not (string= overlay-backend "wireguard")))
       (error "WireGuard relay requires the wireguard overlay backend"))
-    (let* ((grpc-server (apply #'ag-grpc:make-grpc-server port :host host
-                             :max-connections-per-ip max-connections-per-ip
-                             (node-server-tls-options pki)))
+    (let* ((grpc-server (gr8s.protocol::grpc-server-uncap-sources
+                         (apply #'ag-grpc:make-grpc-server port :host host
+                                :max-connections max-connections
+                                :max-connections-per-ip max-connections-per-ip
+                                (node-server-tls-options pki))
+                         ;; Loopback is this host's own agents, as many as it hosts nodes.
+                         (lambda (key)
+                           (or (gr8s.protocol::grpc-loopback-key-p key)
+                               (and uncapped-source-p (funcall uncapped-source-p key))))))
          (relay-server
            (when wireguard-relay-address
              (gr8s.network::start-wireguard-relay-server

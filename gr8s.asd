@@ -310,6 +310,7 @@
                                            (:file "http")
                                            (:file "grpc-inflate-compat")
                                            (:file "grpc-deflate-compat")
+                                           (:file "grpc-per-source-compat")
                                            (:file "grpc-unix")
                                            (:file "websocket")
                                            (:file "spdy-dictionary")

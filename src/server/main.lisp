@@ -407,6 +407,10 @@ registry serving a cert-manager certificate from the cluster's ca issuer."
                                                   ((string= option "--browser-busy-above") :browser-busy-above)
                                                   (t :browser-starts-at-once)))
                               count)))
+                     ((string= option "--node-max-connections")
+                      (let ((count (ignore-errors (parse-integer value))))
+                        (unless (and count (plusp count)) (error "~A needs a positive count" option))
+                        (setf (getf options :node-max-connections) count)))
                      ((member option '("--browser-max-nodes" "--browser-max-per-client") :test #'string=)
                       (let ((count (ignore-errors (parse-integer value))))
                         (unless (and count (plusp count)) (error "~A needs a positive count" option))
@@ -3388,7 +3392,17 @@ between later ones. An ordinary restart recovers within the first.")
                   :wireguard-relay-listen (getf options :wireguard-relay-listen)
                   :wireguard-relay-port-start (getf options :wireguard-relay-port-start)
                   :wireguard-relay-max-channels
-                  (getf options :wireguard-relay-max-channels)))
+                  (getf options :wireguard-relay-max-channels)
+                  :max-connections (getf options :node-max-connections
+                                         gr8s.apiserver::+default-node-max-connections+)
+                  ;; The other control-plane members: a follower's hosted nodes, browser
+                  ;; nodes among them, each reach the leader from that member's address.
+                  :uncapped-source-p
+                  (when ha
+                    (lambda (key)
+                      (member key (mapcar (lambda (endpoint) (gr8s.protocol::grpc-address-key (first endpoint)))
+                                          (ha-control-plane-node-endpoints ha (getf options :node-port)))
+                              :test #'equal)))))
            ;; Close the registration race with an authority application between
            ;; the initial reload and listener construction.
            (when pki-authority-observer
@@ -4502,6 +4516,7 @@ No HA API may start from member-local certificate state before this converges."
                         ("--listen IPV4" "API listen address") ("--port PORT" "API port")
                         ("--node-port PORT" "Agent supervisor port") ("--node-name NAME" "Node name")
                         ("--disable-agent" "Run only the control plane")
+                        ("--node-max-connections N" "Accept at most N node connections at once (default 512): one per node, and per browser node this server hosts")
                         ("--browser-listen HOST:PORT" "Serve the browser-node join page and sessions there (podster-57fv)")
                         ("--browser-distro FILE" "The root image (erofs) browser nodes boot Pods from")
                         ("--browser-max-nodes N" "At most N browser nodes connected at once (default 64)")

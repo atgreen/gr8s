@@ -201,10 +201,12 @@ busybox Pod from a DaemonSet.
 | most browser nodes Ready at once | 31 |
 
 The breaking point was 31 nodes. Each browser node's agent holds a node session
-from the server's own address, and the node server takes at most 32 connections
-from one address (podster-7op6). Tabs past that joined and got a Node, but it never
-went Ready. The same cap applies to a single server, whose agents dial it on
-127.0.0.1. Past that cap, CPU is the next limit: at about 2% per node, 4 CPUs pass
+from the server's own address, and the node server took at most 32 connections
+from one address. Tabs past that joined and got a Node, but it never went Ready.
+The same cap applied to a single server, whose agents dial it on 127.0.0.1. Since
+podster-7op6, the cap leaves out loopback and the other control-plane members, and
+the node server takes 512 connections in all (`--node-max-connections`). Past that,
+CPU is the next limit: at about 2% per node, 4 CPUs pass
 the 90% busy limit near 37 nodes (podster-i7yl). Memory comes last: at 9 MiB per
 node, a 1 GiB reserve on this machine leaves room for about 300 more.
 

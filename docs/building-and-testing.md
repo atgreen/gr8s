@@ -247,7 +247,10 @@ owner-only and contains administrative credentials.
   when `CNI_COMMAND` is present.
 
 The node endpoint defaults to loopback port 7443. Set `--node-listen` and
-`--node-port` for a node-facing address. The Kubernetes API defaults to
+`--node-port` for a node-facing address. It accepts 512 connections at once
+(`--node-max-connections`), one per node and one per browser node the server
+hosts. It accepts at most 32 from any one address, except loopback and the other
+control-plane members, whose hosted nodes each hold a connection. The Kubernetes API defaults to
 HTTPS on `0.0.0.0:6443`; `--listen` and `--port` change its binding.
 Agents advertise the source IPv4 address of their control connection for
 VXLAN, or use an explicit `--node-address` on multi-interface hosts.

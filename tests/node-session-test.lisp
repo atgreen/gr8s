@@ -2744,6 +2744,50 @@ Returns the server's next message."
         (bt:join-thread unblock))
       (is (null (ignore-errors (gr8s.controllers::get-node store "browser-blocked")))))))
 
+(test the-node-listener-caps-strangers-but-not-its-own-hosts
+  ;; podster-7op6: the per-source cap keeps one peer from filling the node listener, but
+  ;; a server hosting browser nodes dials it once per node from its own address. Loopback
+  ;; and the sources the server names (its control-plane peers) aren't capped.
+  (let* ((member (gr8s.protocol::grpc-address-key "10.77.77.20"))
+         (stranger (gr8s.protocol::grpc-address-key "203.0.113.7"))
+         (loopback (gr8s.protocol::grpc-address-key "127.0.0.1"))
+         (server (gr8s.protocol::grpc-server-uncap-sources
+                  (ag-grpc:make-grpc-server 0 :max-connections-per-ip 2)
+                  (lambda (key) (or (gr8s.protocol::grpc-loopback-key-p key) (equal key member))))))
+    (is (equal "#(10 77 77 20)" member))
+    (is-true (gr8s.protocol::grpc-loopback-key-p (gr8s.protocol::grpc-address-key "::1")))
+    (is-false (gr8s.protocol::grpc-loopback-key-p stranger))
+    (flet ((reserve (key) (ag-grpc::server-try-reserve-ip-slot server key)))
+      (is-true (reserve stranger))
+      (is-true (reserve stranger))
+      (is-false (reserve stranger))
+      (ag-grpc::server-release-ip-slot server stranger)
+      (is-true (reserve stranger))
+      (is-true (loop repeat 100 always (reserve loopback)))
+      (is-true (loop repeat 100 always (reserve member)))
+      ;; Releasing an uncapped source's connections leaves the stranger's count alone.
+      (loop repeat 100 do (ag-grpc::server-release-ip-slot server member))
+      (is-false (reserve stranger))
+      ;; A server given no such sources caps them all, loopback included.
+      (gr8s.protocol::grpc-server-uncap-sources server nil)
+      (is-true (reserve loopback))
+      (is-true (reserve loopback))
+      (is-false (reserve loopback))))
+  ;; The node listener lets in its own host's agents, and the peers serve names.
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((server (gr8s.apiserver::start-node-grpc-server
+                   store :host "127.0.0.1" :port 0 :max-connections-per-ip 1
+                   :uncapped-source-p (lambda (key) (equal key "#(10 77 77 21)")))))
+      (unwind-protect
+           (let ((grpc (gr8s.apiserver::node-grpc-server-grpc-server server)))
+             (is (= 512 (ag-grpc::server-max-connections grpc)))
+             (is-true (loop repeat 5 always (ag-grpc::server-try-reserve-ip-slot grpc "#(127 0 0 1)")))
+             (is-true (loop repeat 5 always (ag-grpc::server-try-reserve-ip-slot grpc "#(10 77 77 21)")))
+             (is-true (ag-grpc::server-try-reserve-ip-slot grpc "#(10 77 77 22)"))
+             (is-false (ag-grpc::server-try-reserve-ip-slot grpc "#(10 77 77 22)")))
+        (gr8s.apiserver::stop-node-grpc-server server)))))
+
 (test control-plane-logs-come-from-the-assigned-remote-agent
   (with-temporary-store (store path)
     (gr8s.controllers::register-node
