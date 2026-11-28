@@ -22,6 +22,7 @@
      (validate-pod-host-settings spec)
      (validate-pod-hostname-fields spec)
      (validate-runtime-pod-spec spec)
+     (when (gr8s.foundation::kubernetes-minor-at-least-p 38) (validate-pod-stop-signals spec))
      (validate-pod-dns-spec spec)
      (default-host-network-ports spec))
    :resource-validator

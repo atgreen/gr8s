@@ -42,7 +42,9 @@
   reason
   message
   labels
-  log-path)
+  log-path
+  ;; The signal the runtime stops the container with, a CRI Signal (0: the image's).
+  (stop-signal 0))
 
 (defstruct cri-pod-sandbox-info
   id
@@ -361,12 +363,41 @@ AUTH is a (username . password) credential for the registry."
            (gr8s.cri.v1::image-ref response))
       (ag-grpc:channel-close channel))))
 
+(defparameter +linux-stop-signals+
+  '("SIGABRT" "SIGALRM" "SIGBUS" "SIGCHLD" "SIGCLD" "SIGCONT" "SIGFPE" "SIGHUP" "SIGILL" "SIGINT"
+    "SIGIO" "SIGIOT" "SIGKILL" "SIGPIPE" "SIGPOLL" "SIGPROF" "SIGPWR" "SIGQUIT" "SIGSEGV"
+    "SIGSTKFLT" "SIGSTOP" "SIGSYS" "SIGTERM" "SIGTRAP" "SIGTSTP" "SIGTTIN" "SIGTTOU" "SIGURG"
+    "SIGUSR1" "SIGUSR2" "SIGVTALRM" "SIGWINCH" "SIGXCPU" "SIGXFSZ" "SIGRTMIN"
+    "SIGRTMIN+1" "SIGRTMIN+2" "SIGRTMIN+3" "SIGRTMIN+4" "SIGRTMIN+5" "SIGRTMIN+6" "SIGRTMIN+7"
+    "SIGRTMIN+8" "SIGRTMIN+9" "SIGRTMIN+10" "SIGRTMIN+11" "SIGRTMIN+12" "SIGRTMIN+13"
+    "SIGRTMIN+14" "SIGRTMIN+15" "SIGRTMAX-14" "SIGRTMAX-13" "SIGRTMAX-12" "SIGRTMAX-11"
+    "SIGRTMAX-10" "SIGRTMAX-9" "SIGRTMAX-8" "SIGRTMAX-7" "SIGRTMAX-6" "SIGRTMAX-5" "SIGRTMAX-4"
+    "SIGRTMAX-3" "SIGRTMAX-2" "SIGRTMAX-1" "SIGRTMAX")
+  "The stop signals a Linux container may name in lifecycle.stopSignal, as the API spells them.")
+
+(defun cri-stop-signal (name)
+  "The CRI Signal for NAME, a stop signal as the API spells it (SIGRTMIN+1 is SIGRTMINPLUS1),
+or the runtime's default, 0, for NIL or a name CRI doesn't know."
+  (let ((symbol (and name (find-symbol (format nil "+SIGNAL-~A+"
+                                               (cl-ppcre:regex-replace-all
+                                                "-" (cl-ppcre:regex-replace-all "\\+" name "PLUS") "MINUS"))
+                                       '#:gr8s.cri.v1))))
+    (if (and symbol (boundp symbol)) (symbol-value symbol) 0)))
+
+(defun cri-stop-signal-name (signal)
+  "The API's name for SIGNAL, a CRI Signal, or NIL for the runtime's default."
+  (and signal (not (eql 0 signal))
+       (find signal +linux-stop-signals+ :key #'cri-stop-signal)))
+
 (defun make-cri-container-config
     (&key name image command args env uid mounts security-context resources working-directory
-          stdin stdin-once tty labels cdi-device-ids devices annotations (attempt 0) log-path)
-  "Build the complete CRI config, including DRA-provided CDI device names."
+          stdin stdin-once tty labels cdi-device-ids devices annotations (attempt 0) log-path
+          stop-signal)
+  "Build the complete CRI config, including DRA-provided CDI device names. STOP-SIGNAL is the
+container's lifecycle.stopSignal, or NIL for the image's."
   (make-instance
    'gr8s.cri.v1::container-config
+   :stop-signal (cri-stop-signal stop-signal)
    :metadata (make-instance 'gr8s.cri.v1::container-metadata
                             :name name :attempt attempt)
    :image (make-instance 'gr8s.cri.v1::image-spec :image image)
@@ -395,7 +426,8 @@ AUTH is a (username . password) credential for the registry."
 (defun cri-create-container
     (socket-path sandbox-id sandbox-config
      &key name image command args env uid mounts security-context resources working-directory
-          stdin stdin-once tty labels cdi-device-ids devices annotations (attempt 0) log-path (timeout 120))
+          stdin stdin-once tty labels cdi-device-ids devices annotations (attempt 0) log-path stop-signal
+          (timeout 120))
   "Create a container in SANDBOX-ID and return its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
@@ -412,7 +444,7 @@ AUTH is a (username . password) credential for the registry."
                         :resources resources :working-directory working-directory
                         :stdin stdin :stdin-once stdin-once :tty tty :labels labels
                         :cdi-device-ids cdi-device-ids :devices devices :annotations annotations
-                        :attempt attempt :log-path log-path))
+                        :attempt attempt :log-path log-path :stop-signal stop-signal))
               :timeout timeout)
            (ensure-cri-status "CreateContainer" status)
            (gr8s.cri.v1::container-id response))
@@ -567,7 +599,8 @@ AUTH is a (username . password) credential for the registry."
               :reason (gr8s.cri.v1::reason container-status)
               :message (gr8s.cri.v1::message container-status)
               :labels (gr8s.cri.v1::labels container-status)
-              :log-path (gr8s.cri.v1::log-path container-status))))
+              :log-path (gr8s.cri.v1::log-path container-status)
+              :stop-signal (or (gr8s.cri.v1::stop-signal container-status) 0))))
       (ag-grpc:channel-close channel))))
 
 (defun cri-stop-container (socket-path container-id &key (grace-period 0) (timeout (+ grace-period 30)))
