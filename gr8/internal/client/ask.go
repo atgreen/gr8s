@@ -115,6 +115,12 @@ func (gate *terminalGate) Read(p []byte) (int, error) {
 }
 
 func (gate *terminalGate) read(p []byte, stop <-chan struct{}) (int, error) {
+	// An ended reader takes nothing more, not even what is left over.
+	select {
+	case <-stop:
+		return 0, io.EOF
+	default:
+	}
 	if len(gate.leftover) > 0 {
 		n := copy(p, gate.leftover)
 		gate.leftover = gate.leftover[n:]
@@ -135,6 +141,29 @@ func (gate *terminalGate) read(p []byte, stop <-chan struct{}) (int, error) {
 
 // Detach ends the command's stdin, once the command has ended.
 func (gate *terminalGate) Detach() { gate.detach.Do(func() { close(gate.detached) }) }
+
+// Attempt is the command's stdin for one exec stream: when done is called, as the
+// stream ends, a read still waiting there (client-go's copier outlives the stream)
+// ends too, so keys typed next go to the next stream, not into the broken one.
+func (gate *terminalGate) Attempt() (stdin io.Reader, done func()) {
+	stop := make(chan struct{})
+	var once sync.Once
+	return attemptReader{gate, stop}, func() { once.Do(func() { close(stop) }) }
+}
+
+type attemptReader struct {
+	gate *terminalGate
+	stop chan struct{}
+}
+
+func (reader attemptReader) Read(p []byte) (int, error) {
+	select {
+	case <-reader.gate.detached:
+		return 0, io.EOF
+	default:
+	}
+	return reader.gate.read(p, reader.stop)
+}
 
 // After is what is typed after Detach, for gr8's own questions.
 func (gate *terminalGate) After() io.Reader { return afterReader{gate} }
@@ -251,6 +280,21 @@ func (gate *terminalGate) Ask(question, answers, keys string, fallback byte) byt
 	gate.mutex.Unlock()
 	gate.release()
 	return answer
+}
+
+// Banner shows text on the bottom row, the cursor put back, until ClearBanner: for
+// what gr8 says while the command can't be reached, as while it reconnects.
+func (gate *terminalGate) Banner(text string) {
+	gate.mutex.Lock()
+	defer gate.mutex.Unlock()
+	fmt.Fprint(gate.out, "\x1b7"+gate.bottomRow()+"\x1b[1mgr8:\x1b[0m "+gate.fit(text, "")+"\x1b8")
+}
+
+// ClearBanner clears the bottom row Banner wrote, the cursor put back.
+func (gate *terminalGate) ClearBanner() {
+	gate.mutex.Lock()
+	defer gate.mutex.Unlock()
+	fmt.Fprint(gate.out, "\x1b7"+gate.bottomRow()+"\x1b8")
 }
 
 // Say shows message on the bottom row for a moment, as Ask shows a question.

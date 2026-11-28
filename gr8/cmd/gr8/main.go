@@ -35,6 +35,8 @@ func main() {
 			os.Exit(sandbox.Enter(client.HostRoot, os.Args[3:]))
 		case "confine":
 			os.Exit(sandbox.Confine(os.Args[3:]))
+		case "attach":
+			os.Exit(sandbox.Attach(os.Args[3:]))
 		}
 		fmt.Fprintf(os.Stderr, "gr8: no internal mode %q\n", os.Args[2])
 		os.Exit(sandbox.ExitCannotRun)
@@ -46,7 +48,8 @@ func run() int {
 	var options client.Options
 	var readOnly, readWrite, env, allow stringList
 	var login, logout string
-	var logins, setup bool
+	var logins, setup, sessions bool
+	var attach string
 	flags := flag.NewFlagSet("gr8", flag.ExitOnError)
 	flags.Usage = func() {
 		fmt.Fprintf(flags.Output(), "usage: gr8 [flags] COMMAND [ARG...]\n\n"+
@@ -72,6 +75,8 @@ func run() int {
 	flags.StringVar(&login, "login", "", "move the `NAME`d login (claude, or one in ~/.config/gr8/logins.yaml) into the cluster")
 	flags.StringVar(&logout, "logout", "", "remove the `NAME`d login from the cluster")
 	flags.BoolVar(&logins, "logins", false, "list the logins gr8 knows and which are stored")
+	flags.StringVar(&attach, "attach", "", "come back to the running command in the run `POD` (see --sessions)")
+	flags.BoolVar(&sessions, "sessions", false, "list your runs, which --attach comes back to")
 	flags.Var(&readOnly, "ro", "also allow reading `PATH` (repeatable)")
 	flags.Var(&readWrite, "rw", "also allow writing `PATH` (repeatable)")
 	flags.Var(&allow, "allow", "also allow reaching `HOSTNAME` (repeatable; *.example.com for subdomains)")
@@ -93,7 +98,7 @@ func run() int {
 			fmt.Fprintf(os.Stderr, "gr8 --setup: %v\n", err)
 			return 1
 		}
-		if flags.NArg() == 0 && login == "" && logout == "" && !logins {
+		if flags.NArg() == 0 && login == "" && logout == "" && !logins && attach == "" && !sessions {
 			return 0
 		}
 	}
@@ -114,6 +119,23 @@ func run() int {
 			return 1
 		}
 		fmt.Printf("gr8: %s's login is gone from the cluster (its own file on this host is untouched)\n", logout)
+		return 0
+	case attach != "":
+		status, err := client.Attach(options.Kubeconfig, options.Namespace, attach)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gr8 --attach %s: %v\n", attach, err)
+			return sandbox.ExitCannotRun
+		}
+		return status
+	case sessions:
+		lines, err := client.Sessions(options.Kubeconfig, options.Namespace)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gr8 --sessions: %v\n", err)
+			return 1
+		}
+		for _, line := range lines {
+			fmt.Println(line)
+		}
 		return 0
 	case logins:
 		lines, err := client.ListLogins(options.Kubeconfig, options.Namespace)
