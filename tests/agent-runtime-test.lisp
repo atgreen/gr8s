@@ -317,6 +317,39 @@
         (is (null (runtime-observe runtime (pod-uid pod))))
         (gr8s.agent::stop-node-runtime second)))))
 
+(test a-virtual-agent-leaves-its-hosts-ports-alone
+  ;; podster-mtqe: a browser node's agent runs in its host's process and network, so the
+  ;; host's node ports, health checks and Gateway listeners are the host agent's. Each
+  ;; virtual agent binding them too failed EADDRINUSE on every pass, forever.
+  (with-temporary-store (control-store path)
+    (declare (ignore control-store))
+    (let ((opened '())
+          (forwarders (fdefinition 'gr8s.agent::converge-node-port-forwarders))
+          (listeners (fdefinition 'gr8s.controllers::converge-gateway-listeners)))
+      (unwind-protect
+           (progn
+             (setf (fdefinition 'gr8s.agent::converge-node-port-forwarders)
+                   (lambda (&rest arguments) (declare (ignore arguments)) (push :node-ports opened))
+                   (fdefinition 'gr8s.controllers::converge-gateway-listeners)
+                   (lambda (&rest arguments) (declare (ignore arguments)) (push :gateway opened)))
+             (flet ((one-pass (name virtual)
+                      (let ((node-runtime (gr8s.agent::make-node-runtime
+                                           (merge-pathnames (format nil "~A/" name) path) (make-fake-runtime) nil)))
+                        (setf (gr8s.agent::node-runtime-node-name node-runtime) name)
+                        (if virtual
+                            (setf (gethash name gr8s.agent::*virtual-agents*) t)
+                            (remhash name gr8s.agent::*virtual-agents*))
+                        (setf opened '())
+                        (gr8s.agent::start-node-runtime node-runtime)
+                        (unwind-protect (gr8s.agent::reconcile-node-snapshot node-runtime (desired-snapshot-for-test))
+                          (gr8s.agent::stop-node-runtime node-runtime)
+                          (remhash name gr8s.agent::*virtual-agents*))
+                        (sort (copy-list opened) #'string<))))
+               (is (equal '(:gateway :node-ports) (one-pass "host" nil)))
+               (is (null (one-pass "browser-a1b2c3" t)))))
+        (setf (fdefinition 'gr8s.agent::converge-node-port-forwarders) forwarders
+              (fdefinition 'gr8s.controllers::converge-gateway-listeners) listeners)))))
+
 (test control-plane-runtime-schedules-and-publishes-authoritative-snapshots
   (with-temporary-store (store path)
     (values path)

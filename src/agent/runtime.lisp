@@ -2311,6 +2311,13 @@ RESOURCES. A failure keeps the trust already installed."
     (error (condition)
       (format *error-output* "gr8s: registry trust update failed: ~A~%" condition))))
 
+(defun node-runtime-virtual-p (node-runtime)
+  "Whether NODE-RUNTIME is a virtual node's, a browser node's: it runs in the process of
+the node hosting it and shares that host's network, so the host's ports (node ports,
+health checks, Gateway listeners) are that node's agent's to open, not this one's
+(podster-mtqe)."
+  (and (gethash (node-runtime-node-name node-runtime) *virtual-agents*) t))
+
 (defun reconcile-node-snapshot (node-runtime snapshot)
   "Apply one control-plane SNAPSHOT to this node and return the assigned Pods' observed
 statuses. Errors unless the runtime is running, and waits briefly for a restarting
@@ -2419,7 +2426,7 @@ or Gateway listeners did not converge, so the revision is retried."
               (error (condition)
                 (setf convergence-ready nil)
                 (format *error-output* "gr8s: Service LB convergence failed: ~A~%" condition))))
-          (unless gateway-update
+          (unless (or gateway-update (node-runtime-virtual-p node-runtime))
             (handler-case
                 (progn
                   (converge-node-port-forwarders (node-runtime-node-port-forwarders node-runtime)
