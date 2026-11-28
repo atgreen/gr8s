@@ -215,9 +215,11 @@ authenticated user, which gr8s answers without stored RBAC objects.")
 
 (defun authenticated-default-grant-p (identity verb group resource url)
   "Report what upstream's default bindings grant every authenticated user: reading the
-discovery and health URLs, and creating self reviews (system:basic-user)."
+discovery and health URLs, and creating self reviews (system:basic-user). The URLs are
+non-resource URLs, as RBAC's nonResourceURLs are: a request for a RESOURCE under /api or
+/apis is never granted by them, or every user could read every named object."
   (and (find "system:authenticated" (api-identity-groups identity) :test #'equal)
-       (if url
+       (if (and url (null resource))
            (and (member verb '("get" "head") :test #'equal)
                 (some (lambda (pattern)
                         (if (uiop:string-suffix-p pattern "*")
